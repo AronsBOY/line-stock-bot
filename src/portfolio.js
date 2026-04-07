@@ -36,7 +36,9 @@ async function getPortfolio() {
       COUNT(*) as buy_count,
       ROUND(AVG(buy_price)::numeric, 2) as avg_price,
       MIN(buy_price) as min_price,
-      MAX(buy_price) as max_price
+      MAX(buy_price) as max_price,
+      MIN(buy_date) as first_date,
+      MAX(buy_date) as last_date
     FROM portfolio
     GROUP BY stock_code, stock_name
     ORDER BY stock_code
