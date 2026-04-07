@@ -4,7 +4,7 @@ const line = require("@line/bot-sdk");
 const { parseSingleMessage } = require("./signalParser");
 const { fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
 const { setupScheduler, addSignal } = require("./scheduler");
-const { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll } = require("./portfolio");
+const { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy } = require("./portfolio");
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -131,6 +131,25 @@ async function handleEvent(event) {
     });
     msg += "─".repeat(20) + "\n共 " + rows.length + " 次　均價：" + avg;
     await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
+    return;
+  }
+
+  if (text.startsWith("修改 ")) {
+    const parts = text.split(" ");
+    const code = parts[1] ? parts[1].trim() : "";
+    const newPrice = parts[2] ? parseFloat(parts[2]) : null;
+    if (!code || !/^\d{4,6}$/.test(code) || !newPrice || isNaN(newPrice)) {
+      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：修改 股票代號 新價格\n例如：修改 2330 900" }] });
+      return;
+    }
+    const updated = await updateLastBuy(code, newPrice);
+    if (!updated) {
+      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "找不到 " + code + " 的記錄" }] });
+      return;
+    }
+    const rows = await getStockDetail(code);
+    const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
+    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "已修改！\n" + code + " 最後一筆改為 " + newPrice + "\n目前均價：" + avg }] });
     return;
   }
 
