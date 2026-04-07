@@ -66,4 +66,12 @@ async function clearAll() {
   await pool.query("DELETE FROM portfolio");
 }
 
-module.exports = { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll };
+async function updateLastBuy(stockCode, newPrice) {
+  const result = await pool.query(
+    "UPDATE portfolio SET buy_price = $1 WHERE id = (SELECT id FROM portfolio WHERE stock_code = $2 ORDER BY created_at DESC LIMIT 1)",
+    [newPrice, stockCode]
+  );
+  return result.rowCount > 0;
+}
+
+module.exports = { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy };
