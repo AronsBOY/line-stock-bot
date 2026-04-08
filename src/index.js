@@ -66,26 +66,43 @@ async function handleEvent(event) {
   if (text.startsWith("新增 ")) {
     const parts = text.split(" ");
     const code = parts[1] ? parts[1].trim() : "";
-    const name = parts[2] ? parts.slice(2).join(" ").trim() : code;
+    const hasDate = parts[parts.length - 1] && /^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}$/.test(parts[parts.length - 1]);
+    const dateStr = hasDate ? parts[parts.length - 1] : null;
+    const name = hasDate ? parts.slice(2, parts.length - 1).join(" ").trim() || code : parts.slice(2).join(" ").trim() || code;
+
     if (!code || !/^\d{4,6}$/.test(code)) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：新增 股票代號 股票名稱\n例如：新增 2330 台積電" }] });
+      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：新增 股票代號 股票名稱\n例如：新增 2330 台積電\n\n或指定日期：\n新增 2330 台積電 2026/03/18" }] });
       return;
     }
-    const priceData = await fetchMultipleStocks([code]);
-    const p = priceData[code];
-    if (!p) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 的股價，請稍後再試" }] });
-      return;
+
+    let price, priceType;
+    if (dateStr) {
+      const hist = await fetchHistoricalClose(code, dateStr);
+      if (!hist) {
+        await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 在 " + dateStr + " 的收盤價\n可能是假日或非交易日" }] });
+        return;
+      }
+      price = parseFloat(hist.price);
+      priceType = dateStr + " 收盤價";
+    } else {
+      const priceData = await fetchMultipleStocks([code]);
+      const p = priceData[code];
+      if (!p) {
+        await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 的股價，請稍後再試" }] });
+        return;
+      }
+      price = parseFloat(p.price);
+      priceType = p.marketStatus === "盤中" ? "即時股價" : "盤後股價";
     }
-    const price = parseFloat(p.price);
-    const priceType = p.marketStatus === "盤中" ? "即時股價" : "盤後股價";
-    await addBuy(code, name, price, date);
+
+    await addBuy(code, name, price, dateStr || date);
     const rows = await getStockDetail(code);
     const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
     const msg = "已記錄！\n" + code + " " + name + "\n" + priceType + "：" + price + "\n共買入：" + rows.length + " 次\n目前均價：" + avg;
     await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
+
 
   if (text === "持股") {
     const rows = await getPortfolio();
