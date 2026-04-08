@@ -14,8 +14,12 @@ async function initDB() {
         stock_name VARCHAR(50),
         buy_price DECIMAL(10,2) NOT NULL,
         buy_date VARCHAR(20),
+        note VARCHAR(100),
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+    await pool.query(`
+      ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS note VARCHAR(100)
     `);
     console.log("資料庫初始化完成");
   } catch (err) {
@@ -23,10 +27,10 @@ async function initDB() {
   }
 }
 
-async function addBuy(stockCode, stockName, buyPrice, buyDate) {
+async function addBuy(stockCode, stockName, buyPrice, buyDate, note) {
   await pool.query(
-    "INSERT INTO portfolio (stock_code, stock_name, buy_price, buy_date) VALUES ($1, $2, $3, $4)",
-    [stockCode, stockName || stockCode, buyPrice, buyDate]
+    "INSERT INTO portfolio (stock_code, stock_name, buy_price, buy_date, note) VALUES ($1, $2, $3, $4, $5)",
+    [stockCode, stockName || stockCode, buyPrice, buyDate, note || null]
   );
 }
 
@@ -38,7 +42,8 @@ async function getPortfolio() {
       MIN(buy_price) as min_price,
       MAX(buy_price) as max_price,
       MIN(buy_date) as first_date,
-      MAX(buy_date) as last_date
+      MAX(buy_date) as last_date,
+      STRING_AGG(DISTINCT note, ' / ') as notes
     FROM portfolio
     GROUP BY stock_code, stock_name
     ORDER BY stock_code
