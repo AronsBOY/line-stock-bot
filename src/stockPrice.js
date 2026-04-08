@@ -2,13 +2,22 @@ const axios = require("axios");
 
 async function fetchStockPrice(stockCode) {
   try {
-    const { data } = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + stockCode + ".TW", {
-      params: { interval: "1m", range: "1d" },
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 8000,
-    });
-    const result = data.chart && data.chart.result && data.chart.result[0];
-    if (!result) return null;
+    let data = null;
+    for (const suffix of [".TW", ".TWO"]) {
+      try {
+        const res = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + stockCode + suffix, {
+          params: { interval: "1m", range: "1d" },
+          headers: { "User-Agent": "Mozilla/5.0" },
+          timeout: 8000,
+        });
+        if (res.data.chart?.result?.[0]) {
+          data = res.data;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!data) return null;
+    const result = data.chart.result[0];
     const meta = result.meta;
     const price = meta.regularMarketPrice;
     const prev = meta.previousClose || meta.chartPreviousClose;
