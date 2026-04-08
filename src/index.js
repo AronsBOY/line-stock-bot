@@ -1,9 +1,9 @@
 require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
+const Anthropic = require("@anthropic-ai/sdk");
 const { parseSingleMessage } = require("./signalParser");
 const { fetchMultipleStocks, fetchHistoricalClose, formatFlexMessage } = require("./stockPrice");
-
 const { setupScheduler, addSignal } = require("./scheduler");
 const { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy } = require("./portfolio");
 
@@ -11,10 +11,10 @@ const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
-
 const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const app = express();
 app.use("/webhook", line.middleware(lineConfig));
@@ -24,7 +24,6 @@ app.get("/", function(req, res) {
 });
 
 const recentSignals = new Map();
-
 function isDuplicate(groupId, stockCode, action) {
   const key = groupId + "_" + stockCode + "_" + action;
   const last = recentSignals.get(key);
@@ -32,6 +31,21 @@ function isDuplicate(groupId, stockCode, action) {
   if (last && now - last < 300000) return true;
   recentSignals.set(key, now);
   return false;
+}
+
+async function parseBatchSignals(text) {
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 2000,
+    system: `你是台股訊號解析專家。從歷史操作記錄中提取所有買入訊號。
+只回傳JSON陣列，不要任何說明：
+[{"date":"YYYY/MM/DD","stock_code":"4位數字","stock_name":"股票名稱","price_note":"原始價位描述如200以下或290-300附近或平盤下"}]
+只提取買入/買進/加碼/建立基本持股，忽略賣出。
+若同一天同一支股票有多次買入訊號，分別列出。`,
+    messages: [{ role: "user", content: text }],
+  });
+  const raw = response.content[0].text.replace(/```json|```/g, "").trim();
+  return JSON.parse(raw);
 }
 
 async function handleEvent(event) {
@@ -61,7 +75,7 @@ async function handleEvent(event) {
   const time = now.toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false });
   const date = now.toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" });
 
-  console.log("[" + time + "] " + senderName + ": " + text);
+  console.log("[" + time + "] " + senderName + ": " + text.slice(0, 50));
 
   if (text.startsWith("新增 ")) {
     const parts = text.split(" ");
@@ -95,7 +109,7 @@ async function handleEvent(event) {
       priceType = p.marketStatus === "盤中" ? "即時股價" : "盤後股價";
     }
 
-    await addBuy(code, name, price, dateStr || date);
+    await addBuy(code, name, price, dateStr || date, null);
     const rows = await getStockDetail(code);
     const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
     const msg = "已記錄！\n" + code + " " + name + "\n" + priceType + "：" + price + "\n共買入：" + rows.length + " 次\n目前均價：" + avg;
@@ -103,6 +117,49 @@ async function handleEvent(event) {
     return;
   }
 
+  if (text.startsWith("回溯\n") || text.startsWith("回溯 ")) {
+    const content = text.replace(/^回溯[\n ]/, "").trim();
+    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "⏳ 正在解析歷史訊號，請稍候..." }] });
+
+    try {
+      const signals = await parseBatchSignals(content);
+      if (signals.length === 0) {
+        await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "沒有找到買入訊號" }] });
+        return;
+      }
+
+      const codes = [...new Set(signals.map(function(s){return s.stock_code;}))];
+      const prices = await fetchMultipleStocks(codes);
+
+      let successCount = 0;
+      let failList = [];
+      let summary = "回溯完成！\n" + "─".repeat(20) + "\n";
+
+      for (const sig of signals) {
+        const p = prices[sig.stock_code];
+        if (!p) {
+          failList.push(sig.stock_code + " " + sig.stock_name);
+          continue;
+        }
+        const price = parseFloat(p.price);
+        await addBuy(sig.stock_code, sig.stock_name, price, sig.date, sig.price_note);
+        summary += sig.date + " " + sig.stock_code + " " + sig.stock_name + "\n";
+        summary += "  現價：" + price + "　備註：" + sig.price_note + "\n";
+        successCount++;
+      }
+
+      summary += "─".repeat(20) + "\n成功記錄 " + successCount + " 筆";
+      if (failList.length > 0) {
+        summary += "\n無法取得行情：" + failList.join("、");
+      }
+
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: summary }] });
+    } catch (err) {
+      console.error("[回溯]", err.message);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回溯失敗：" + err.message }] });
+    }
+    return;
+  }
 
   if (text === "持股") {
     const rows = await getPortfolio();
@@ -125,6 +182,7 @@ async function handleEvent(event) {
       msg += "\n" + r.stock_code + " " + stockName + "\n";
       msg += "  買入：" + r.buy_count + " 次　均價：" + r.avg_price + "\n";
       msg += "  首次買入：" + (r.first_date || "-") + "\n";
+      if (r.notes) msg += "  價位備註：" + r.notes + "\n";
       if (currentPrice) {
         msg += "  現價：" + currentPrice + "　" + arrow + Math.abs(profitPct) + "%\n";
         msg += "  未實現損益：" + (profitAmt >= 0 ? "+" : "") + profitAmt + " 元/股\n";
@@ -145,7 +203,9 @@ async function handleEvent(event) {
     const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
     let msg = code + " " + rows[0].stock_name + " 買入明細\n" + "─".repeat(20) + "\n";
     rows.forEach(function(r, i) {
-      msg += (i+1) + ". " + r.buy_date + " 買入 " + r.buy_price + "\n";
+      msg += (i+1) + ". " + r.buy_date + " 買入 " + r.buy_price;
+      if (r.note) msg += "　(" + r.note + ")";
+      msg += "\n";
     });
     msg += "─".repeat(20) + "\n共 " + rows.length + " 次　均價：" + avg;
     await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
