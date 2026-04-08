@@ -2,7 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
 const { parseSingleMessage } = require("./signalParser");
-const { fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
+const { fetchMultipleStocks, fetchHistoricalClose, formatFlexMessage } = require("./stockPrice");
+
 const { setupScheduler, addSignal } = require("./scheduler");
 const { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy } = require("./portfolio");
 
