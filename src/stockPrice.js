@@ -45,6 +45,56 @@ async function fetchStockPrice(stockCode) {
   }
 }
 
+async function fetchHistoricalClose(stockCode, dateStr) {
+  try {
+    const parts = dateStr.replace(/\//g, "-").split("-");
+    const year = parseInt(parts[0]);
+    const month = parseInt(parts[1]) - 1;
+    const day = parseInt(parts[2]);
+    const targetDate = new Date(Date.UTC(year, month, day));
+    const p1 = Math.floor(targetDate.getTime() / 1000) - 86400;
+    const p2 = Math.floor(targetDate.getTime() / 1000) + 172800;
+
+    let data = null;
+    for (const suffix of [".TW", ".TWO"]) {
+      try {
+        const res = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + stockCode + suffix, {
+          params: { interval: "1d", period1: p1, period2: p2 },
+          headers: { "User-Agent": "Mozilla/5.0" },
+          timeout: 8000,
+        });
+        if (res.data.chart?.result?.[0]?.timestamp?.length > 0) {
+          data = res.data;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!data) return null;
+
+    const result = data.chart.result[0];
+    const timestamps = result.timestamp || [];
+    const closes = result.indicators?.quote?.[0]?.close || [];
+
+    let closestPrice = null;
+    let closestDiff = Infinity;
+    timestamps.forEach(function(ts, i) {
+      const d = new Date((ts + 8 * 3600) * 1000);
+      const dStr = d.toISOString().slice(0, 10);
+      const targetStr = targetDate.toISOString().slice(0, 10);
+      const diff = Math.abs(new Date(dStr) - new Date(targetStr));
+      if (diff < closestDiff && closes[i]) {
+        closestDiff = diff;
+        closestPrice = closes[i];
+      }
+    });
+
+    const longName = result.meta.longName || result.meta.shortName || stockCode;
+    return closestPrice ? { price: closestPrice.toFixed(2), longName } : null;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function fetchMultipleStocks(codes) {
   const unique = [];
   codes.forEach(function(c) { if (!unique.includes(c)) unique.push(c); });
@@ -103,4 +153,4 @@ function formatFlexMessage(signals, pricesMap) {
   };
 }
 
-module.exports = { fetchStockPrice, fetchMultipleStocks, formatFlexMessage };
+module.exports = { fetchStockPrice, fetchHistoricalClose, fetchMultipleStocks, formatFlexMessage };
