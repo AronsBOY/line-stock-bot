@@ -37,11 +37,7 @@ async function parseBatchSignals(text) {
   const response = await anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 2000,
-    system: `你是台股訊號解析專家。從歷史操作記錄中提取所有買入訊號。
-只回傳JSON陣列，不要任何說明：
-[{"date":"YYYY/MM/DD","stock_code":"4位數字","stock_name":"股票名稱","price_note":"原始價位描述如200以下或290-300附近或平盤下"}]
-只提取買入/買進/加碼/建立基本持股，忽略賣出。
-若同一天同一支股票有多次買入訊號，分別列出。`,
+    system: "你是台股訊號解析專家。從歷史操作記錄中提取所有買入訊號。只回傳JSON陣列，不要任何說明：[{\"date\":\"YYYY/MM/DD\",\"stock_code\":\"4位數字\",\"stock_name\":\"股票名稱\",\"price_note\":\"原始價位描述\"}] 只提取買入/買進/加碼/建立基本持股，忽略賣出。",
     messages: [{ role: "user", content: text }],
   });
   const raw = response.content[0].text.replace(/```json|```/g, "").trim();
@@ -81,18 +77,14 @@ async function handleEvent(event) {
     try {
       const parts = text.trim().split(/\s+/);
       const code = parts[1] ? parts[1].trim() : "";
-
       if (!code || !/^\d{4,6}$/.test(code)) {
         await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：\n新增 代號\n新增 代號 日期\n新增 代號 日期 價格\n\n例如：\n新增 2330\n新增 2330 2026-03-18\n新增 2330 2026-03-18 850" }] });
         return;
       }
-
       const datePattern = /^\d{4}[\.\-\/]\d{1,2}[\.\-\/]\d{1,2}$|^\d{8}$/;
       const dateStr = parts[2] && datePattern.test(parts[2]) ? parts[2] : null;
       const manualPrice = parts[3] ? parseFloat(parts[3]) : null;
-
       let price, priceType, stockName;
-
       if (dateStr && manualPrice && !isNaN(manualPrice)) {
         price = manualPrice;
         priceType = dateStr + " 手動填入";
@@ -119,7 +111,6 @@ async function handleEvent(event) {
         stockName = p.longName || code;
         priceType = p.marketStatus === "盤中" ? "即時股價" : "盤後股價";
       }
-
       await addBuy(code, stockName, price, dateStr || date, null);
       const rows = await getStockDetail(code);
       const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
@@ -134,34 +125,29 @@ async function handleEvent(event) {
 
   if (text.startsWith("回溯\n") || text.startsWith("回溯 ")) {
     const content = text.replace(/^回溯[\n ]/, "").trim();
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "⏳ 正在解析歷史訊號，請稍候..." }] });
+    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "正在解析歷史訊號，請稍候..." }] });
     try {
       const signals = await parseBatchSignals(content);
       if (signals.length === 0) {
         await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "沒有找到買入訊號" }] });
         return;
       }
-      const codes = [...new Set(signals.map(function(s){return s.stock_code;}))];
+      const codes = [...new Set(signals.map(function(s){ return s.stock_code; }))];
       const prices = await fetchMultipleStocks(codes);
       let successCount = 0;
       let failList = [];
       let summary = "回溯完成！\n" + "─".repeat(20) + "\n";
       for (const sig of signals) {
         const p = prices[sig.stock_code];
-        if (!p) {
-          failList.push(sig.stock_code + " " + sig.stock_name);
-          continue;
-        }
+        if (!p) { failList.push(sig.stock_code + " " + sig.stock_name); continue; }
         const price = parseFloat(p.price);
         await addBuy(sig.stock_code, sig.stock_name, price, sig.date, sig.price_note);
         summary += sig.date + " " + sig.stock_code + " " + sig.stock_name + "\n";
-        summary += "  現價：" + price + "　備註：" + sig.price_note + "\n";
+        summary += "  現價：" + price + " 備註：" + sig.price_note + "\n";
         successCount++;
       }
       summary += "─".repeat(20) + "\n成功記錄 " + successCount + " 筆";
-      if (failList.length > 0) {
-        summary += "\n無法取得行情：" + failList.join("、");
-      }
+      if (failList.length > 0) { summary += "\n無法取得行情：" + failList.join("、"); }
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: summary }] });
     } catch (err) {
       console.error("[回溯]", err.message);
@@ -176,86 +162,7 @@ async function handleEvent(event) {
       await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "目前沒有持股記錄\n\n用「新增 代號」來記錄買入\n例如：新增 2330" }] });
       return;
     }
-    const codes = rows.map(function(r){return r.stock_code;});
+    const codes = rows.map(function(r){ return r.stock_code; });
     const prices = await fetchMultipleStocks(codes);
     const nowStr = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
-    let msg = "目前持股　" + nowStr + "\n" + "─".repeat(24) + "\n";
-    rows.forEach(function(r) {
-      const p = prices[r.stock_code];
-      const currentPrice = p ? parseFloat(p.price) : null;
-      const avg = parseFloat(r.avg_price);
-      const profitPct = currentPrice ? ((currentPrice - avg) / avg * 100).toFixed(2) : null;
-      const profitAmt = currentPrice ? (currentPrice - avg).toFixed(2) : null;
-      const arrow = profitPct >= 0 ? "▲" : "▼";
-      const stockName = r.stock_name === r.stock_code ? r.stock_code : r.stock_name;
-      msg += "\n" + r.stock_code + " " + stockName + "\n";
-      msg += "  買入：" + r.buy_count + " 次　均價：" + r.avg_price + "\n";
-      msg += "  首次買入：" + (r.first_date || "-") + "\n";
-      if (r.notes) msg += "  價位備註：" + r.notes + "\n";
-      if (currentPrice) {
-        msg += "  現價：" + currentPrice + "　" + arrow + Math.abs(profitPct) + "%\n";
-        msg += "  未實現損益：" + (profitAmt >= 0 ? "+" : "") + profitAmt + " 元/股\n";
-      }
-    });
-    msg += "\n" + "─".repeat(24) + "\n輸入「明細 代號」查看每筆記錄";
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
-    return;
-  }
-
-  if (text.startsWith("明細 ")) {
-    const code = text.replace("明細 ", "").trim();
-    const rows = await getStockDetail(code);
-    if (rows.length === 0) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "找不到 " + code + " 的記錄" }] });
-      return;
-    }
-    const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
-    let msg = code + " " + rows[0].stock_name + " 買入明細\n" + "─".repeat(20) + "\n";
-    rows.forEach(function(r, i) {
-      msg += (i+1) + ". " + r.buy_date + " 買入 " + r.buy_price;
-      if (r.note) msg += "　(" + r.note + ")";
-      msg += "\n";
-    });
-    msg += "─".repeat(20) + "\n共 " + rows.length + " 次　均價：" + avg;
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
-    return;
-  }
-
-  if (text.startsWith("修改 ")) {
-    const parts = text.split(" ");
-    const code = parts[1] ? parts[1].trim() : "";
-    const newPrice = parts[2] ? parseFloat(parts[2]) : null;
-    if (!code || !/^\d{4,6}$/.test(code) || !newPrice || isNaN(newPrice)) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：修改 股票代號 新價格\n例如：修改 2330 900" }] });
-      return;
-    }
-    const updated = await updateLastBuy(code, newPrice);
-    if (!updated) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "找不到 " + code + " 的記錄" }] });
-      return;
-    }
-    const rows = await getStockDetail(code);
-    const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "已修改！\n" + code + " 最後一筆改為 " + newPrice + "\n目前均價：" + avg }] });
-    return;
-  }
-
-  if (text.startsWith("清除 ") && text !== "清除全部") {
-    const code = text.replace("清除 ", "").trim();
-    const count = await clearStock(code);
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: count > 0 ? "已清除 " + code + " 的 " + count + " 筆記錄" : "找不到 " + code + " 的記錄" }] });
-    return;
-  }
-
-  if (text === "清除全部") {
-    await clearAll();
-    await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "已清除所有持股記錄" }] });
-    return;
-  }
-
-  if (text.startsWith("查股 ") || text.startsWith("/stock ")) {
-    const code = text.replace(/^查股 |^\/stock /, "").trim();
-    if (/^\d{4,6}$/.test(code)) {
-      const prices = await fetchMultipleStocks([code]);
-      const p = prices[code];
-      const msg = p ? p.code + " " + p.longName +​​​​​​​​​​​​​​​​
+    let msg = "目前持股 " + nowStr + "\n" + "─".repeat(24​​​​​​​​​​​​​​​​
