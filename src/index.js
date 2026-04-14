@@ -70,7 +70,6 @@ async function handleEvent(event) {
   const now = new Date();
   const time = now.toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false });
   const date = now.toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" });
-
   console.log("[" + time + "] " + senderName + ": " + text.slice(0, 50));
 
   if (text.startsWith("新增 ")) {
@@ -78,33 +77,32 @@ async function handleEvent(event) {
       const parts = text.trim().split(/\s+/);
       const code = parts[1] ? parts[1].trim() : "";
       if (!code || !/^\d{4,6}$/.test(code)) {
-        await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n新增 代號\n新增 代號 日期\n新增 代號 日期 價格\n\n例如：\n新增 2330\n新增 2330 2026-03-18\n新增 2330 2026-03-18 850" }] });
+        await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n新增 代號\n新增 代號 日期\n新增 代號 日期 價格" }] });
         return;
       }
-      const datePattern = /^\d{4}[\.-\/]\d{1,2}[\.-\/]\d{1,2}$|^\d{8}$/;
+      const datePattern = /^\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2}$|^\d{8}$/;
       const dateStr = parts[2] && datePattern.test(parts[2]) ? parts[2] : null;
       const manualPrice = parts[3] ? parseFloat(parts[3]) : null;
       let price, priceType, stockName;
       if (dateStr && manualPrice && !isNaN(manualPrice)) {
         price = manualPrice;
         priceType = dateStr + " 手動填入";
-        const priceData = await fetchMultipleStocks([code]);
-        const p = priceData[code];
-        stockName = p ? p.longName : code;
+        const pd = await fetchMultipleStocks([code]);
+        stockName = pd[code] ? pd[code].longName : code;
       } else if (dateStr) {
         const hist = await fetchHistoricalClose(code, dateStr);
         if (!hist) {
-          await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 在 " + dateStr + " 的收盤價\n可能是假日或非交易日" }] });
+          await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 在 " + dateStr + " 的收盤價" }] });
           return;
         }
         price = parseFloat(hist.price);
         stockName = hist.longName || code;
         priceType = dateStr + " 收盤價";
       } else {
-        const priceData = await fetchMultipleStocks([code]);
-        const p = priceData[code];
+        const pd = await fetchMultipleStocks([code]);
+        const p = pd[code];
         if (!p) {
-          await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 的股價，請稍後再試" }] });
+          await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 的股價" }] });
           return;
         }
         price = parseFloat(p.price);
@@ -114,8 +112,7 @@ async function handleEvent(event) {
       await addBuy(code, stockName, price, dateStr || date, null);
       const rows = await getStockDetail(code);
       const avg = (rows.reduce(function(a,b){return a+parseFloat(b.buy_price);},0)/rows.length).toFixed(2);
-      const msg = "已記錄！\n" + code + " " + stockName + "\n" + priceType + "：" + price + "\n共買入：" + rows.length + " 次\n目前均價：" + avg;
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
+      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "已記錄！\n" + code + " " + stockName + "\n" + priceType + "：" + price + "\n共買入：" + rows.length + " 次\n目前均價：" + avg }] });
     } catch (err) {
       console.error("[新增]", err.message);
       await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "新增失敗：" + err.message }] });
@@ -140,17 +137,15 @@ async function handleEvent(event) {
       for (const sig of signals) {
         const p = prices[sig.stock_code];
         if (!p) { failList.push(sig.stock_code + " " + sig.stock_name); continue; }
-        const price = parseFloat(p.price);
-        await addBuy(sig.stock_code, sig.stock_name, price, sig.date, sig.price_note);
+        await addBuy(sig.stock_code, sig.stock_name, parseFloat(p.price), sig.date, sig.price_note);
         summary += sig.date + " " + sig.stock_code + " " + sig.stock_name + "\n";
-        summary += "  現價：" + price + " 備註：" + sig.price_note + "\n";
+        summary += "  現價：" + p.price + " 備註：" + sig.price_note + "\n";
         successCount++;
       }
       summary += "====================\n成功記錄 " + successCount + " 筆";
       if (failList.length > 0) { summary += "\n無法取得行情：" + failList.join("、"); }
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: summary }] });
     } catch (err) {
-      console.error("[回溯]", err.message);
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回溯失敗：" + err.message }] });
     }
     return;
@@ -168,18 +163,18 @@ async function handleEvent(event) {
     let msg = "目前持股 " + nowStr + "\n====================\n";
     rows.forEach(function(r) {
       const p = prices[r.stock_code];
-      const currentPrice = p ? parseFloat(p.price) : null;
+      const cur = p ? parseFloat(p.price) : null;
       const avg = parseFloat(r.avg_price);
-      const profitPct = currentPrice ? ((currentPrice - avg) / avg * 100).toFixed(2) : null;
-      const profitAmt = currentPrice ? (currentPrice - avg).toFixed(2) : null;
-      const stockName = r.stock_name === r.stock_code ? r.stock_code : r.stock_name;
-      msg += "\n" + r.stock_code + " " + stockName + "\n";
+      const pct = cur ? ((cur - avg) / avg * 100).toFixed(2) : null;
+      const amt = cur ? (cur - avg).toFixed(2) : null;
+      const nm = r.stock_name === r.stock_code ? r.stock_code : r.stock_name;
+      msg += "\n" + r.stock_code + " " + nm + "\n";
       msg += "  買入：" + r.buy_count + " 次 均價：" + r.avg_price + "\n";
       msg += "  首次買入：" + (r.first_date || "-") + "\n";
       if (r.notes) { msg += "  備註：" + r.notes + "\n"; }
-      if (currentPrice) {
-        msg += "  現價：" + currentPrice + " " + (profitPct >= 0 ? "▲" : "▼") + Math.abs(profitPct) + "%\n";
-        msg += "  未實現損益：" + (profitAmt >= 0 ? "+" : "") + profitAmt + " 元/股\n";
+      if (cur) {
+        msg += "  現價：" + cur + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct) + "%\n";
+        msg += "  未實現損益：" + (amt >= 0 ? "+" : "") + amt + " 元/股\n";
       }
     });
     msg += "\n====================\n輸入「明細 代號」查看每筆記錄";
@@ -211,7 +206,7 @@ async function handleEvent(event) {
     const code = parts[1] ? parts[1].trim() : "";
     const newPrice = parts[2] ? parseFloat(parts[2]) : null;
     if (!code || !/^\d{4,6}$/.test(code) || !newPrice || isNaN(newPrice)) {
-      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n請用：修改 股票代號 新價格\n例如：修改 2330 900" }] });
+      await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: "格式錯誤！\n修改 股票代號 新價格\n例如：修改 2330 900" }] });
       return;
     }
     const updated = await updateLastBuy(code, newPrice);
@@ -241,14 +236,9 @@ async function handleEvent(event) {
   if (text.startsWith("查股 ") || text.startsWith("/stock ")) {
     const code = text.replace(/^查股 |^\/stock /, "").trim();
     if (/^\d{4,6}$/.test(code)) {
-      const prices = await fetchMultipleStocks([code]);
-      const p = prices[code];
-      let msg;
-      if (p) {
-        msg = p.code + " " + p.longName + "\n現價：" + p.price + " TWD\n" + (p.isUp ? "▲" : "▼") + " " + Math.abs(p.change) + " (" + Math.abs(p.changePct) + "%)\n最高：" + p.high + " 最低：" + p.low + "\n" + p.marketStatus + " " + p.timestamp;
-      } else {
-        msg = "無法取得 " + code + " 的行情";
-      }
+      const ps = await fetchMultipleStocks([code]);
+      const p = ps[code];
+      const msg = p ? p.code + " " + p.longName + "\n現價：" + p.price + " TWD\n" + (p.isUp ? "▲" : "▼") + " " + Math.abs(p.change) + " (" + Math.abs(p.changePct) + "%)\n最高：" + p.high + " 最低：" + p.low + "\n" + p.marketStatus + " " + p.timestamp : "無法取得 " + code + " 的行情";
       await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
       return;
     }

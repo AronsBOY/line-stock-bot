@@ -18,9 +18,7 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    await pool.query(`
-      ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS note VARCHAR(100)
-    `);
+    await pool.query(`ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS note VARCHAR(100)`);
     console.log("資料庫初始化完成");
   } catch (err) {
     console.error("資料庫初始化失敗:", err.message);
@@ -36,7 +34,8 @@ async function addBuy(stockCode, stockName, buyPrice, buyDate, note) {
 
 async function getPortfolio() {
   const result = await pool.query(`
-    SELECT stock_code, stock_name,
+    SELECT stock_code,
+      (array_agg(stock_name ORDER BY created_at DESC))[1] as stock_name,
       COUNT(*) as buy_count,
       ROUND(AVG(buy_price)::numeric, 2) as avg_price,
       MIN(buy_price) as min_price,
@@ -45,7 +44,7 @@ async function getPortfolio() {
       MAX(buy_date) as last_date,
       STRING_AGG(DISTINCT note, ' / ') as notes
     FROM portfolio
-    GROUP BY stock_code, stock_name
+    GROUP BY stock_code
     ORDER BY stock_code
   `);
   return result.rows;
