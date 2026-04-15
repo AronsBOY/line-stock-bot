@@ -69,7 +69,7 @@ async function handleEvent(event) {
     if (/^\d{4,6}$/.test(code)) {
       const prices = await fetchMultipleStocks([code]);
       const p = prices[code];
-      let msg = p
+      const msg = p
         ? p.code + " " + p.longName + "\n現價：" + p.price + " TWD\n" + (p.isUp ? "▲" : "▼") + " " + Math.abs(p.change) + " (" + Math.abs(p.changePct) + "%)\n最高：" + p.high + " 最低：" + p.low + "\n" + p.marketStatus + " " + p.timestamp
         : "無法取得 " + code + " 的行情";
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
@@ -80,21 +80,17 @@ async function handleEvent(event) {
   // 新增買入：新增 5475 2026-03-18 212
   const buyMatch = text.match(/^新增\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
   if (buyMatch) {
-    const code = buyMatch[1], date = buyMatch[2], price = buyMatch[3];
-    const name = code;
-    portfolio.addBuy(code, name, date, price);
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增買入\n" + code + " " + date + " @" + price }] });
+    portfolio.addBuy(buyMatch[1], buyMatch[1], buyMatch[2], buyMatch[3]);
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增買入\n" + buyMatch[1] + " " + buyMatch[2] + " @" + buyMatch[3] }] });
     return;
   }
 
   // 新增賣出：賣出 5475 2026-04-15 320
   const sellMatch = text.match(/^賣出\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
   if (sellMatch) {
-    const code = sellMatch[1], date = sellMatch[2], price = sellMatch[3];
-    const name = code;
-    portfolio.addSell(code, name, date, price);
+    portfolio.addSell(sellMatch[1], sellMatch[1], sellMatch[2], sellMatch[3]);
     const settled = portfolio.getSettledSummary();
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增賣出\n" + code + " " + date + " @" + price + "\n\n" + settled }] });
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增賣出\n" + sellMatch[1] + " " + sellMatch[2] + " @" + sellMatch[3] + "\n\n" + settled }] });
     return;
   }
 
@@ -108,8 +104,19 @@ async function handleEvent(event) {
 
   // 查看持股
   if (text === "持股" || text === "我的持股") {
-    const msg = portfolio.getHoldingSummary();
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
+    try {
+      const allCodes = [...new Set(portfolio.portfolio.buys.map(function(b) { return b.code; }))];
+      const livePrices = {};
+      for (let i = 0; i < allCodes.length; i++) {
+        const result = await fetchMultipleStocks([allCodes[i]]);
+        if (result[allCodes[i]]) livePrices[allCodes[i]] = result[allCodes[i]];
+      }
+      const msg = portfolio.getHoldingSummary(livePrices);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
+    } catch (err) {
+      console.error("[持股]", err.message);
+    }
     return;
   }
 
