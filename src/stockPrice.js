@@ -1,16 +1,32 @@
 const axios = require("axios");
 
 async function fetchChineseName(stockCode) {
-  const sources = [
+  for (const suffix of [".TWO", ".TW"]) {
+    const sym = stockCode + suffix;
+    try {
+      const res = await axios.get("https://query1.finance.yahoo.com/v1/finance/search", {
+        params: { q: sym, lang: "zh-TW", region: "TW", quotesCount: 3, newsCount: 0 },
+        headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000
+      });
+      const quotes = res.data && res.data.quotes;
+      if (quotes && quotes.length > 0) {
+        for (const q of quotes) {
+          if (q.symbol === sym) {
+            const name = q.shortname || q.longname || null;
+            if (name && !/^[A-Za-z0-9 ]/.test(name)) return name;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  for (const url of [
     "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_" + stockCode + ".tw&json=1&delay=0",
     "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_" + stockCode + ".tw&json=1&delay=0",
-  ];
-  for (const url of sources) {
+  ]) {
     try {
-      const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000 });
-      const data = res.data;
-      if (data && data.msgArray && data.msgArray.length > 0 && data.msgArray[0].n) {
-        return data.msgArray[0].n;
+      const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://mis.twse.com.tw" }, timeout: 5000 });
+      if (res.data && res.data.msgArray && res.data.msgArray.length > 0 && res.data.msgArray[0].n) {
+        return res.data.msgArray[0].n;
       }
     } catch (e) {}
   }
@@ -90,26 +106,18 @@ async function fetchHistoricalClose(stockCode, dateStr) {
     if (!data) return null;
     const result = data.chart.result[0];
     const timestamps = result.timestamp || [];
-    const closes = result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close || [];
+    const closes = (result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close) || [];
     let closestPrice = null;
     let closestDiff = Infinity;
     timestamps.forEach(function(ts, i) {
       const d = new Date((ts + 8 * 3600) * 1000);
-      const dStr = d.toISOString().slice(0, 10);
-      const tStr = targetDate.toISOString().slice(0, 10);
-      const diff = Math.abs(new Date(dStr) - new Date(tStr));
-      if (diff < closestDiff && closes[i]) {
-        closestDiff = diff;
-        closestPrice = closes[i];
-      }
+      const diff = Math.abs(new Date(d.toISOString().slice(0, 10)) - new Date(targetDate.toISOString().slice(0, 10)));
+      if (diff < closestDiff && closes[i]) { closestDiff = diff; closestPrice = closes[i]; }
     });
     if (!closestPrice) return null;
     const cnName = await fetchChineseName(stockCode);
     const meta = result.meta;
-    return {
-      price: closestPrice.toFixed(2),
-      longName: cnName || meta.longName || meta.shortName || stockCode
-    };
+    return { price: closestPrice.toFixed(2), longName: cnName || meta.longName || meta.shortName || stockCode };
   } catch (err) {
     return null;
   }
@@ -120,9 +128,7 @@ async function fetchMultipleStocks(codes) {
   codes.forEach(function(c) { if (!unique.includes(c)) unique.push(c); });
   const results = await Promise.allSettled(unique.map(function(c) { return fetchStockPrice(c); }));
   const output = {};
-  unique.forEach(function(code, i) {
-    output[code] = results[i].status === "fulfilled" ? results[i].value : null;
-  });
+  unique.forEach(function(code, i) { output[code] = results[i].status === "fulfilled" ? results[i].value : null; });
   return output;
 }
 
@@ -134,16 +140,12 @@ function formatFlexMessage(signals, pricesMap) {
     const arrow = p && parseFloat(p.change) >= 0 ? "▲" : "▼";
     return {
       type: "bubble", size: "kilo",
-      header: {
-        type: "box", layout: "vertical", paddingAll: "16px",
-        backgroundColor: isBuy ? "#1A3A2A" : "#3A1A1A",
+      header: { type: "box", layout: "vertical", paddingAll: "16px", backgroundColor: isBuy ? "#1A3A2A" : "#3A1A1A",
         contents: [
           { type: "text", text: isBuy ? "買入" : "賣出", color: isBuy ? "#00C851" : "#FF4444", size: "sm", weight: "bold" },
           { type: "text", text: sig.stock_code + " " + (sig.stock_name || ""), size: "xl", weight: "bold", color: "#FFFFFF" },
-        ],
-      },
-      body: {
-        type: "box", layout: "vertical", paddingAll: "16px", backgroundColor: "#1A1A1A",
+        ]},
+      body: { type: "box", layout: "vertical", paddingAll: "16px", backgroundColor: "#1A1A1A",
         contents: p ? [
           { type: "box", layout: "horizontal", alignItems: "center", contents: [
             { type: "text", text: p.price, size: "3xl", weight: "bold", color: color, flex: 1 },
@@ -155,22 +157,15 @@ function formatFlexMessage(signals, pricesMap) {
             { type: "box", layout: "vertical", flex: 1, contents: [{ type: "text", text: "最低", size: "xs", color: "#888888" }, { type: "text", text: p.low, size: "sm", weight: "bold" }]},
             { type: "box", layout: "vertical", flex: 1, contents: [{ type: "text", text: "狀態", size: "xs", color: "#888888" }, { type: "text", text: p.marketStatus, size: "sm", weight: "bold" }]},
           ]},
-        ] : [{ type: "text", text: "無法取得行情", color: "#888888", size: "sm" }],
-      },
-      footer: {
-        type: "box", layout: "vertical", paddingAll: "12px", backgroundColor: "#111111",
+        ] : [{ type: "text", text: "無法取得行情", color: "#888888", size: "sm" }]},
+      footer: { type: "box", layout: "vertical", paddingAll: "12px", backgroundColor: "#111111",
         contents: [
           { type: "text", text: sig.sender + " " + sig.time, size: "xs", color: "#888888" },
           { type: "text", text: sig.original, size: "xs", color: "#666666", wrap: true, margin: "sm" },
-        ],
-      },
+        ]},
     };
   });
-  return {
-    type: "flex",
-    altText: "偵測到 " + signals.length + " 個股票訊號",
-    contents: { type: "carousel", contents: bubbles },
-  };
+  return { type: "flex", altText: "偵測到 " + signals.length + " 個股票訊號", contents: { type: "carousel", contents: bubbles } };
 }
 
-module.exports = { fetchStockPrice, fetchHistoricalClose, fetchMultipleStocks, formatFlexMessage };
+module.exports = { fetchStockPrice, fetchHistoricalClose, fetchMultipleStocks, formatFlexMessage, fetchChineseName };

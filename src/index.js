@@ -3,7 +3,7 @@ const express = require("express");
 const line = require("@line/bot-sdk");
 const Anthropic = require("@anthropic-ai/sdk");
 const { parseSingleMessage } = require("./signalParser");
-const { fetchMultipleStocks, fetchHistoricalClose, formatFlexMessage } = require("./stockPrice");
+const { fetchMultipleStocks, fetchHistoricalClose, formatFlexMessage, fetchChineseName } = require("./stockPrice");
 const { setupScheduler, addSignal } = require("./scheduler");
 const { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy } = require("./portfolio");
 
@@ -31,6 +31,13 @@ function isDuplicate(groupId, stockCode, action) {
   if (last && now - last < 300000) return true;
   recentSignals.set(key, now);
   return false;
+}
+
+async function getStockName(code, fallback) {
+  const cn = await fetchChineseName(code);
+  if (cn) return cn;
+  if (fallback && fallback !== code) return fallback;
+  return code;
 }
 
 async function parseBatchSignals(text) {
@@ -88,7 +95,8 @@ async function handleEvent(event) {
         price = manualPrice;
         priceType = dateStr + " 手動填入";
         const pd = await fetchMultipleStocks([code]);
-        stockName = pd[code] ? pd[code].longName : code;
+        const enName = pd[code] ? pd[code].longName : null;
+        stockName = await getStockName(code, enName);
       } else if (dateStr) {
         const hist = await fetchHistoricalClose(code, dateStr);
         if (!hist) {
@@ -96,7 +104,7 @@ async function handleEvent(event) {
           return;
         }
         price = parseFloat(hist.price);
-        stockName = hist.longName || code;
+        stockName = await getStockName(code, hist.longName);
         priceType = dateStr + " 收盤價";
       } else {
         const pd = await fetchMultipleStocks([code]);
@@ -106,7 +114,7 @@ async function handleEvent(event) {
           return;
         }
         price = parseFloat(p.price);
-        stockName = p.longName || code;
+        stockName = await getStockName(code, p.longName);
         priceType = p.marketStatus === "盤中" ? "即時股價" : "盤後股價";
       }
       await addBuy(code, stockName, price, dateStr || date, null);
@@ -137,8 +145,9 @@ async function handleEvent(event) {
       for (const sig of signals) {
         const p = prices[sig.stock_code];
         if (!p) { failList.push(sig.stock_code + " " + sig.stock_name); continue; }
-        await addBuy(sig.stock_code, p.longName || sig.stock_name, parseFloat(p.price), sig.date, sig.price_note);
-        summary += sig.date + " " + sig.stock_code + " " + (p.longName || sig.stock_name) + "\n";
+        const cnName = await getStockName(sig.stock_code, p.longName);
+        await addBuy(sig.stock_code, cnName, parseFloat(p.price), sig.date, sig.price_note);
+        summary += sig.date + " " + sig.stock_code + " " + cnName + "\n";
         summary += "  現價：" + p.price + " 備註：" + sig.price_note + "\n";
         successCount++;
       }
@@ -159,6 +168,10 @@ async function handleEvent(event) {
     }
     const codes = rows.map(function(r){ return r.stock_code; });
     const prices = await fetchMultipleStocks(codes);
+    const detailsMap = {};
+    for (const r of rows) {
+      detailsMap[r.stock_code] = await getStockDetail(r.stock_code);
+    }
     const nowStr = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
     let msg = "目前持股 " + nowStr + "\n====================\n";
     rows.forEach(function(r) {
@@ -170,15 +183,20 @@ async function handleEvent(event) {
       const totalAmt = cur ? ((cur - avg) * cnt).toFixed(0) : null;
       const nm = r.stock_name || r.stock_code;
       msg += "\n" + r.stock_code + " " + nm + "\n";
-      msg += "  買入：" + cnt + " 次 均價：" + r.avg_price + "\n";
-      msg += "  首次買入：" + (r.first_date || "-") + "\n";
-      if (r.notes) { msg += "  備註：" + r.notes + "\n"; }
+      msg += "  均價：" + r.avg_price + "\n";
+      const details = detailsMap[r.stock_code] || [];
+      details.forEach(function(d, i) {
+        msg += "  " + (i+1) + ". " + d.buy_date + " " + d.buy_price;
+        if (d.note) { msg += " (" + d.note + ")"; }
+        msg += "\n";
+      });
       if (cur) {
         msg += "  現價：" + cur + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct) + "%\n";
         msg += "  未實現損益：" + (totalAmt >= 0 ? "+" : "") + totalAmt + " 元\n";
       }
+      if (r.notes) { msg += "  備註：" + r.notes + "\n"; }
     });
-    msg += "\n====================\n輸入「明細 代號」查看每筆記錄";
+    msg += "\n====================";
     await lineClient.replyMessage({ replyToken: replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
