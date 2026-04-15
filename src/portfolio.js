@@ -1,81 +1,57 @@
-const { Pool } = require("pg");
+const portfolio = { buys: [], sells: [] };
+let nextId = 1;
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS portfolio (
-        id SERIAL PRIMARY KEY,
-        stock_code VARCHAR(10) NOT NULL,
-        stock_name VARCHAR(50),
-        buy_price DECIMAL(10,2) NOT NULL,
-        buy_date VARCHAR(20),
-        note VARCHAR(100),
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    await pool.query(`ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS note VARCHAR(100)`);
-    console.log("資料庫初始化完成");
-  } catch (err) {
-    console.error("資料庫初始化失敗:", err.message);
-  }
+function addBuy(code, name, date, price) {
+  portfolio.buys.push({ id: nextId++, code, name, date, price: parseFloat(price) });
 }
 
-async function addBuy(stockCode, stockName, buyPrice, buyDate, note) {
-  await pool.query(
-    "INSERT INTO portfolio (stock_code, stock_name, buy_price, buy_date, note) VALUES ($1, $2, $3, $4, $5)",
-    [stockCode, stockName || stockCode, buyPrice, buyDate, note || null]
-  );
+function addSell(code, name, date, price) {
+  portfolio.sells.push({ id: nextId++, code, name, date, price: parseFloat(price) });
 }
 
-async function getPortfolio() {
-  const result = await pool.query(`
-    SELECT stock_code,
-      (array_agg(stock_name ORDER BY created_at DESC))[1] as stock_name,
-      COUNT(*) as buy_count,
-      ROUND(AVG(buy_price)::numeric, 2) as avg_price,
-      MIN(buy_price) as min_price,
-      MAX(buy_price) as max_price,
-      MIN(buy_date) as first_date,
-      MAX(buy_date) as last_date,
-      STRING_AGG(DISTINCT note, ' / ') as notes
-    FROM portfolio
-    GROUP BY stock_code
-    ORDER BY stock_code
-  `);
-  return result.rows;
+function cancelEntry(code, date) {
+  const bi = portfolio.buys.findIndex(function(b) { return b.code === code && b.date === date; });
+  if (bi !== -1) { portfolio.buys.splice(bi, 1); return "已取消買入 " + code + " " + date; }
+  const si = portfolio.sells.findIndex(function(s) { return s.code === code && s.date === date; });
+  if (si !== -1) { portfolio.sells.splice(si, 1); return "已取消賣出 " + code + " " + date; }
+  return "找不到 " + code + " " + date + " 的記錄";
 }
 
-async function getStockDetail(stockCode) {
-  const result = await pool.query(
-    "SELECT * FROM portfolio WHERE stock_code = $1 ORDER BY created_at ASC",
-    [stockCode]
-  );
-  return result.rows;
+function getGroups() {
+  const g = {};
+  portfolio.buys.forEach(function(b) {
+    if (!g[b.code]) g[b.code] = { code: b.code, name: b.name, buys: [], sells: [] };
+    g[b.code].buys.push(b);
+  });
+  portfolio.sells.forEach(function(s) {
+    if (!g[s.code]) g[s.code] = { code: s.code, name: s.name, buys: [], sells: [] };
+    g[s.code].sells.push(s);
+  });
+  return Object.values(g);
 }
 
-async function clearStock(stockCode) {
-  const result = await pool.query(
-    "DELETE FROM portfolio WHERE stock_code = $1",
-    [stockCode]
-  );
-  return result.rowCount;
+function getHoldingSummary() {
+  const groups = getGroups();
+  const holding = groups.filter(function(g) { return g.buys.length > g.sells.length; });
+  if (!holding.length) return "目前無持倉";
+  return "目前持倉：\n" + holding.map(function(g) {
+    const avg = g.buys.reduce(function(a, b) { return a + b.price; }, 0) / g.buys.length;
+    return g.code + " " + g.name + " ×" + g.buys.length + " 均價" + avg.toFixed(1);
+  }).join("\n");
 }
 
-async function clearAll() {
-  await pool.query("DELETE FROM portfolio");
+function getSettledSummary() {
+  const groups = getGroups();
+  const settled = groups.filter(function(g) { return g.buys.length > 0 && g.sells.length >= g.buys.length; });
+  if (!settled.length) return "尚無已結算股票";
+  return "已結算：\n" + settled.map(function(g) {
+    const avgBuy = g.buys.reduce(function(a, b) { return a + b.price; }, 0) / g.buys.length;
+    const avgSell = g.sells.slice(0, g.buys.length).reduce(function(a, b) { return a + b.price; }, 0) / g.buys.length;
+    const pnl = (avgSell - avgBuy) * g.buys.length;
+    const pct = (avgSell - avgBuy) / avgBuy * 100;
+    const mark = pnl >= 0 ? "獲利" : "虧損";
+    return g.code + " " + g.name + " " + mark + " " + (pnl >= 0 ? "+" : "") + pnl.toFixed(0) + " (" + (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%)";
+  }).join("\n");
 }
 
-async function updateLastBuy(stockCode, newPrice) {
-  const result = await pool.query(
-    "UPDATE portfolio SET buy_price = $1 WHERE id = (SELECT id FROM portfolio WHERE stock_code = $2 ORDER BY created_at DESC LIMIT 1)",
-    [newPrice, stockCode]
-  );
-  return result.rowCount > 0;
-}
-
-module.exports = { initDB, addBuy, getPortfolio, getStockDetail, clearStock, clearAll, updateLastBuy };
+module.exports = { addBuy, addSell, cancelEntry, getHoldingSummary, getSettledSummary };
