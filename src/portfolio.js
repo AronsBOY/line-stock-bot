@@ -45,21 +45,31 @@ function getHoldingSummary(livePrices) {
   if (!holding.length) return "目前無持倉";
 
   let totalPnl = 0;
+  let totalCost = 0;
+
   const lines = holding.map(function(g) {
-    const qty = g.buys.length;
-    const avg = g.buys.reduce(function(a, b) { return a + b.price; }, 0) / qty;
+    const totalBuy = g.buys.length;
+    const totalSell = g.sells.length;
+    const qty = totalBuy - totalSell;
+    const avg = g.buys.reduce(function(a, b) { return a + b.price; }, 0) / totalBuy;
     const p = livePrices && livePrices[g.code];
     const curPrice = p ? p.price : null;
     const pnlPerShare = curPrice ? curPrice - avg : null;
     const pnlTotal = pnlPerShare !== null ? pnlPerShare * qty * 1000 : null;
     const pct = pnlPerShare !== null ? pnlPerShare / avg * 100 : null;
-    if (pnlTotal !== null) totalPnl += pnlTotal;
+    const costTotal = avg * qty * 1000;
 
-    let line = g.code + " " + g.name + "\n";
-    line += "  均價：" + avg.toFixed(2) + "\n";
+    if (pnlTotal !== null) totalPnl += pnlTotal;
+    totalCost += costTotal;
+
+    let line = g.code + " " + g.name + "　持股：" + qty + " 張\n";
+    line += "  均價：" + avg.toFixed(2) + "　成本：" + Math.round(costTotal).toLocaleString() + " 元\n";
     g.buys.forEach(function(b, i) {
       line += "  " + (i + 1) + ". " + b.date + " " + b.price.toFixed(2) + "\n";
     });
+    if (totalSell > 0) {
+      line += "  已賣出：" + totalSell + " 張\n";
+    }
     if (curPrice !== null) {
       const arrow = pct >= 0 ? "▲" : "▼";
       line += "  現價：" + curPrice + " " + arrow + Math.abs(pct).toFixed(2) + "%\n";
@@ -71,7 +81,10 @@ function getHoldingSummary(livePrices) {
   });
 
   const divider = "═".repeat(20);
-  return lines.join("\n\n") + "\n\n" + divider + "\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
+  return lines.join("\n\n") + "\n\n" + divider +
+    "\n總持股：" + holding.length + " 支" +
+    "\n總成本：" + Math.round(totalCost).toLocaleString() + " 元" +
+    "\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
 }
 
 function getSettledSummary() {
@@ -88,13 +101,14 @@ function getSettledSummary() {
     const pct = (avgSell - avgBuy) / avgBuy * 100;
     totalPnl += pnl;
     const mark = pnl >= 0 ? "獲利" : "虧損";
-    return g.code + " " + g.name + " " + mark + "\n" +
+    return g.code + " " + g.name + " " + mark + "　共 " + qty + " 張\n" +
       "  均買：" + avgBuy.toFixed(2) + "　均賣：" + avgSell.toFixed(2) + "\n" +
       "  已實現損益：" + (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + " 元 (" + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
   });
 
   const divider = "═".repeat(20);
-  return "已結算\n" + divider + "\n" + lines.join("\n\n") + "\n\n" + divider + "\n合計：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
+  return "已結算\n" + divider + "\n" + lines.join("\n\n") + "\n\n" + divider +
+    "\n合計：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
 }
 
 module.exports = { addBuy, addSell, cancelEntry, getHoldingSummary, getSettledSummary, portfolio };
