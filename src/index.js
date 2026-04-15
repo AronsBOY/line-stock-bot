@@ -137,8 +137,8 @@ async function handleEvent(event) {
       for (const sig of signals) {
         const p = prices[sig.stock_code];
         if (!p) { failList.push(sig.stock_code + " " + sig.stock_name); continue; }
-        await addBuy(sig.stock_code, sig.stock_name, parseFloat(p.price), sig.date, sig.price_note);
-        summary += sig.date + " " + sig.stock_code + " " + sig.stock_name + "\n";
+        await addBuy(sig.stock_code, p.longName || sig.stock_name, parseFloat(p.price), sig.date, sig.price_note);
+        summary += sig.date + " " + sig.stock_code + " " + (p.longName || sig.stock_name) + "\n";
         summary += "  現價：" + p.price + " 備註：" + sig.price_note + "\n";
         successCount++;
       }
@@ -165,16 +165,17 @@ async function handleEvent(event) {
       const p = prices[r.stock_code];
       const cur = p ? parseFloat(p.price) : null;
       const avg = parseFloat(r.avg_price);
+      const cnt = parseInt(r.buy_count);
       const pct = cur ? ((cur - avg) / avg * 100).toFixed(2) : null;
-      const amt = cur ? (cur - avg).toFixed(2) : null;
-      const nm = r.stock_name === r.stock_code ? r.stock_code : r.stock_name;
+      const totalAmt = cur ? ((cur - avg) * cnt).toFixed(0) : null;
+      const nm = r.stock_name || r.stock_code;
       msg += "\n" + r.stock_code + " " + nm + "\n";
-      msg += "  買入：" + r.buy_count + " 次 均價：" + r.avg_price + "\n";
+      msg += "  買入：" + cnt + " 次 均價：" + r.avg_price + "\n";
       msg += "  首次買入：" + (r.first_date || "-") + "\n";
       if (r.notes) { msg += "  備註：" + r.notes + "\n"; }
       if (cur) {
         msg += "  現價：" + cur + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct) + "%\n";
-        msg += "  未實現損益：" + (amt >= 0 ? "+" : "") + amt + " 元/股\n";
+        msg += "  未實現損益：" + (totalAmt >= 0 ? "+" : "") + totalAmt + " 元\n";
       }
     });
     msg += "\n====================\n輸入「明細 代號」查看每筆記錄";

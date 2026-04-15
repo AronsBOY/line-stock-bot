@@ -1,28 +1,19 @@
 const axios = require("axios");
 
 async function fetchChineseName(stockCode) {
-  try {
-    const res = await axios.get("https://www.twse.com.tw/rwd/zh/api/stockSearch?keyword=" + stockCode + "&type=ALL", {
-      headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000
-    });
-    const data = res.data;
-    if (data && data.data && data.data.length > 0) {
-      for (const item of data.data) {
-        if (item[0] === stockCode) return item[1];
+  const sources = [
+    "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_" + stockCode + ".tw&json=1&delay=0",
+    "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_" + stockCode + ".tw&json=1&delay=0",
+  ];
+  for (const url of sources) {
+    try {
+      const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000 });
+      const data = res.data;
+      if (data && data.msgArray && data.msgArray.length > 0 && data.msgArray[0].n) {
+        return data.msgArray[0].n;
       }
-    }
-  } catch (e) {}
-  try {
-    const res = await axios.get("https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=EW&s=0,asc,0&d=114/04/15&q=" + stockCode, {
-      headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000
-    });
-    const data = res.data;
-    if (data && data.aaData && data.aaData.length > 0) {
-      for (const item of data.aaData) {
-        if (item[0] === stockCode) return item[1];
-      }
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
   return null;
 }
 
