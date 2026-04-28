@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
 const { parseSingleMessage } = require("./signalParser");
-const { fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
+const { fetchStockPrice, fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
 const { setupScheduler, addSignal } = require("./scheduler");
 const portfolio = require("./portfolio");
 
@@ -31,6 +31,10 @@ function isDuplicate(groupId, stockCode, action) {
   if (last && now - last < 300000) return true;
   recentSignals.set(key, now);
   return false;
+}
+
+function getTodayTW() {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
 }
 
 async function handleEvent(event) {
@@ -77,7 +81,51 @@ async function handleEvent(event) {
     }
   }
 
-  // 新增買入：新增 5475 2026-03-18 212
+  // 簡化買入：買 3533（自動抓今日日期+即時股價）
+  const quickBuyMatch = text.match(/^買\s+(\d{4,6})$/);
+  if (quickBuyMatch) {
+    const code = quickBuyMatch[1];
+    const p = await fetchStockPrice(code);
+    if (!p) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 即時股價，請改用：\n新增 " + code + " " + getTodayTW() + " 價格" }] });
+      return;
+    }
+    const date = getTodayTW();
+    portfolio.addBuy(code, code, date, p.price);
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增買入\n" + code + " " + p.longName + "\n日期：" + date + "\n成交價：" + p.price + "\n（即時 " + p.marketStatus + "）" }] });
+    return;
+  }
+
+  // 簡化賣出：賣 3533 / 賣 3533 一半（自動抓今日日期+即時股價）
+  const quickSellMatch = text.match(/^賣\s+(\d{4,6})(?:\s+(.+))?$/);
+  if (quickSellMatch) {
+    const code = quickSellMatch[1];
+    const qtyStr = quickSellMatch[2] ? quickSellMatch[2].trim() : "全部";
+    const p = await fetchStockPrice(code);
+    if (!p) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得 " + code + " 即時股價，請改用：\n賣出 " + code + " " + getTodayTW() + " 價格" }] });
+      return;
+    }
+    const date = getTodayTW();
+    const holdingCount = portfolio.portfolio.buys.filter(function(b) { return b.code === code; }).length;
+    const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
+    const remaining = holdingCount - soldCount;
+    if (remaining <= 0) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: code + " 目前無持股可賣" }] });
+      return;
+    }
+    let qty = remaining;
+    if (qtyStr === "一半") qty = Math.ceil(remaining / 2);
+    else if (!isNaN(parseInt(qtyStr))) qty = Math.min(parseInt(qtyStr), remaining);
+    for (let i = 0; i < qty; i++) {
+      portfolio.addSell(code, code, date, p.price);
+    }
+    const settled = portfolio.getSettledSummary();
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增賣出\n" + code + " " + p.longName + " ×" + qty + "張\n日期：" + date + "\n成交價：" + p.price + "\n剩餘：" + (remaining - qty) + " 張\n\n" + settled }] });
+    return;
+  }
+
+  // 完整買入：新增 5475 2026-03-18 212
   const buyMatch = text.match(/^新增\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
   if (buyMatch) {
     portfolio.addBuy(buyMatch[1], buyMatch[1], buyMatch[2], buyMatch[3]);
@@ -85,12 +133,26 @@ async function handleEvent(event) {
     return;
   }
 
-  // 新增賣出：賣出 5475 2026-04-15 320
-  const sellMatch = text.match(/^賣出\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
+  // 完整賣出：賣出 3665 2026-03-17 1740 2
+  const sellMatch = text.match(/^賣出\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)(?:\s+(.+))?/);
   if (sellMatch) {
-    portfolio.addSell(sellMatch[1], sellMatch[1], sellMatch[2], sellMatch[3]);
+    const code = sellMatch[1];
+    const date = sellMatch[2];
+    const price = sellMatch[3];
+    const qtyStr = sellMatch[4] ? sellMatch[4].trim() : "1";
+    const holdingCount = portfolio.portfolio.buys.filter(function(b) { return b.code === code; }).length;
+    const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
+    const remaining = holdingCount - soldCount;
+    let qty = 1;
+    if (qtyStr === "一半") qty = Math.ceil(remaining / 2);
+    else if (qtyStr === "全部") qty = remaining;
+    else qty = Math.min(parseInt(qtyStr) || 1, remaining);
+    if (qty < 1) qty = 1;
+    for (let i = 0; i < qty; i++) {
+      portfolio.addSell(code, code, date, price);
+    }
     const settled = portfolio.getSettledSummary();
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增賣出\n" + sellMatch[1] + " " + sellMatch[2] + " @" + sellMatch[3] + "\n\n" + settled }] });
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "已新增賣出\n" + code + " ×" + qty + "張 " + date + " @" + price + "\n剩餘持股：" + (remaining - qty) + " 張\n\n" + settled }] });
     return;
   }
 
