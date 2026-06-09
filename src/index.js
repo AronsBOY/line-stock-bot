@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
+const Anthropic = require("@anthropic-ai/sdk");
 const { parseSingleMessage } = require("./signalParser");
 const { fetchStockPrice, fetchHistoricalPrice, fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
 const { setupScheduler, addSignal } = require("./scheduler");
@@ -13,6 +14,7 @@ const lineConfig = {
 const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const app = express();
 app.use("/webhook", line.middleware(lineConfig));
@@ -22,11 +24,10 @@ const pendingSignals = {};
 
 function isTimeFormat(str) { return /^\d{1,2}:\d{2}$/.test(str); }
 function isPriceFormat(str) { return /^[\d.]+$/.test(str); }
-
 function isTeacher(name) {
-  const teacherName = process.env.SIGNAL_SENDER_NAME || "";
-  if (!teacherName) return false;
-  return name.includes(teacherName) || teacherName.includes(name);
+  const t = process.env.SIGNAL_SENDER_NAME || "";
+  if (!t) return false;
+  return name.includes(t) || t.includes(name);
 }
 
 async function handleEvent(event) {
@@ -61,12 +62,41 @@ async function handleEvent(event) {
     if (p) {
       const arrow = p.isUp ? "▲" : "▼";
       const label = qDate ? (qTime ? qTime + " 歷史價" : "收盤價") : p.marketStatus;
-      const msg = code + " " + p.longName + "\n" + label + "：" + p.price + " TWD\n" +
+      const name = portfolio.CODE_NAMES[code] || p.longName || code;
+      const msg = code + " " + name + "\n" + label + "：" + p.price + " TWD\n" +
         arrow + " " + Math.abs(p.change) + " (" + Math.abs(p.changePct) + "%)\n" +
         (p.high ? "最高：" + p.high + "　最低：" + p.low + "\n" : "") + p.timestamp;
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     } else {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得 " + queryMatch[1] + " 的資料" }] });
+    }
+    return;
+  }
+
+  // ── 股票名稱設定 ──
+  const nameMatch = text.match(/^名稱\s+(\d{4,6})\s+(.+)$/);
+  if (nameMatch) {
+    const result = portfolio.setName(nameMatch[1], nameMatch[2].trim());
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: result + "\n（重啟後需更新 portfolio.js 的 CODE_NAMES 才能永久保存）" }] });
+    return;
+  }
+
+  // ── 個股資訊 / 新聞 ──
+  const newsMatch = text.match(/^新聞\s+(\d{4,6})$/);
+  if (newsMatch) {
+    const code = newsMatch[1];
+    const name = portfolio.CODE_NAMES[code] || code;
+    try {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢 " + code + " " + name + " 資訊中..." }] });
+      const resp = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 500,
+        messages: [{ role: "user", content: "請用繁體中文簡短介紹台股 " + code + " " + name + "，包含：1.主要業務 2.所屬概念股族群 3.近期重要消息（你知道的），200字以內。" }],
+      });
+      const info = resp.content[0].text;
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "📋 " + code + " " + name + "\n" + "─".repeat(18) + "\n" + info }] });
+    } catch (err) {
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "無法取得 " + code + " 的資訊" }] });
     }
     return;
   }
@@ -112,8 +142,8 @@ async function handleEvent(event) {
       else portfolio.addSell(code, code, p.date, p.price);
       delete pendingSignals[code];
     });
-    let msg = "✅ 已記錄 " + (keys.length - failed.length) + " 筆訊號";
-    if (failed.length) msg += "\n⚠ 以下缺少股價，請手動確認：\n" + failed.map(function(c) { return "確認 " + c + " 價格"; }).join("\n");
+    let msg = "✅ 已記錄 " + (keys.length - failed.length) + " 筆";
+    if (failed.length) msg += "\n⚠ 缺少股價：\n" + failed.map(function(c) { return "確認 " + c + " 價格"; }).join("\n");
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
@@ -128,10 +158,16 @@ async function handleEvent(event) {
     const list = keys.map(function(code) {
       const p = pendingSignals[code];
       return code + " " + (portfolio.CODE_NAMES[code] || "") + " " + p.action +
-        (p.price ? " @" + p.price : " ⚠無股價") +
-        "（" + p.date + " " + p.time + "）";
+        (p.price ? " @" + p.price : " ⚠無股價") + "（" + p.date + " " + p.time + "）";
     }).join("\n");
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "待確認訊號：\n" + list + "\n\n回覆「確認 代號」或「確認全部」" }] });
+    return;
+  }
+
+  // ── 備份 ──
+  if (text === "備份") {
+    const backup = portfolio.getBackup();
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: backup }] });
     return;
   }
 
@@ -158,13 +194,13 @@ async function handleEvent(event) {
     else if (isTimeFormat(last)) { const p = await fetchHistoricalPrice(code, sDate, last); price = p ? p.price : null; }
     else if (last === "一半" || last === "全部") { const p = await fetchHistoricalPrice(code, sDate, null); price = p ? p.price : null; qtyStr = last; }
     else if (isPriceFormat(last)) { price = parseFloat(last); }
-    if (!price) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得股價，請手動填入：\n賣 " + code + " " + sDate + " 價格" }] }); return; }
+    if (!price) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得股價" }] }); return; }
     const holdCount = portfolio.portfolio.buys.filter(function(b) { return b.code === code; }).length;
     const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
     const remaining = holdCount - soldCount;
     if (remaining <= 0) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: code + " 目前無持股可賣" }] }); return; }
     let qty = remaining;
-    if (qtyStr === "一半") qty = Math.ceil(remaining / 2);
+    if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
     else if (!isNaN(parseInt(qtyStr))) qty = Math.min(parseInt(qtyStr), remaining);
     for (let i = 0; i < qty; i++) portfolio.addSell(code, code, sDate, price);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出\n" + code + " " + (portfolio.CODE_NAMES[code] || "") + " ×" + qty + "張 @" + price + "\n剩餘：" + (remaining - qty) + " 張" }] });
@@ -188,7 +224,7 @@ async function handleEvent(event) {
     const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
     const remaining = holdCount - soldCount;
     let qty = 1;
-    if (qtyStr === "一半") qty = Math.ceil(remaining / 2);
+    if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
     else if (qtyStr === "全部") qty = remaining;
     else qty = Math.min(parseInt(qtyStr) || 1, remaining);
     for (let i = 0; i < qty; i++) portfolio.addSell(code, code, fsDate, fsPrice);
@@ -234,15 +270,20 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 備份 ──
+  if (text === "備份") {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: portfolio.getBackup() }] });
+    return;
+  }
+
   // ── 指令說明 ──
   if (text === "指令" || text === "help") {
     const msg =
       "📋 指令一覽\n" + "─".repeat(20) + "\n" +
-      "【自動偵測】\n老師發訊號 → Bot 推播確認卡\n\n" +
-      "【確認訊號】\n確認 5475　→ 以歷史價記錄\n確認 5475 158　→ 手動價格記錄\n確認全部　→ 一次全確認\n待確認　→ 查看待確認清單\n\n" +
-      "【買賣記錄】\n買 3533 2026-04-23 10:04　→ 歷史股價\n買 3533 2026-04-23　→ 收盤價\n買 3533 2026-04-23 2445　→ 手動價格\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
-      "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n\n" +
-      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n持股\n結算";
+      "【偵測確認】\n確認 5475　確認 5475 158　確認全部　待確認\n\n" +
+      "【買賣記錄】\n買 3533 2026-04-23 10:04\n買 3533 2026-04-23\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
+      "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
+      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n持股\n結算\n備份";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
@@ -253,48 +294,25 @@ async function handleEvent(event) {
   try {
     const signals = await parseSingleMessage(senderName, timeStr, text);
     if (signals.length === 0) return;
-
     const msgs = [];
     for (let i = 0; i < signals.length; i++) {
       const sig = signals[i];
       const code = sig.stock_code;
       const p = await fetchHistoricalPrice(code, dateStr, timeStr);
       const price = p ? p.price : null;
-
-      pendingSignals[code] = {
-        action: sig.action,
-        date: dateStr,
-        time: timeStr,
-        price: price,
-        suggestedPrice: sig.suggested_price,
-        original: sig.original,
-      };
-
-      const priceLine = price
-        ? "歷史成交價：" + price
-        : "⚠ 股價查詢失敗";
-
+      pendingSignals[code] = { action: sig.action, date: dateStr, time: timeStr, price, suggestedPrice: sig.suggested_price, original: sig.original };
       const msg =
         "📊 偵測到訊號\n" + "━".repeat(16) + "\n" +
         code + " " + (sig.stock_name || portfolio.CODE_NAMES[code] || "") + " " + sig.action + "\n" +
         "時間：" + dateStr + " " + timeStr + "\n" +
         (sig.suggested_price ? "老師建議價：" + sig.suggested_price + "\n" : "") +
-        priceLine + "\n" +
-        "訊息：" + sig.original + "\n" +
-        "━".repeat(16) + "\n" +
-        (price
-          ? "回覆「確認 " + code + "」以 " + price + " 記錄"
-          : "回覆「確認 " + code + " 實際成交價」記錄");
-
+        (price ? "歷史成交價：" + price : "⚠ 股價查詢失敗") + "\n" +
+        "訊息：" + sig.original + "\n" + "━".repeat(16) + "\n" +
+        (price ? "回覆「確認 " + code + "」以 " + price + " 記錄" : "回覆「確認 " + code + " 實際成交價」記錄");
       msgs.push({ type: "text", text: msg });
     }
-
-    if (msgs.length > 0) {
-      await lineClient.replyMessage({ replyToken, messages: msgs.slice(0, 5) });
-    }
-  } catch (err) {
-    console.error("[老師訊號]", err.message);
-  }
+    if (msgs.length > 0) await lineClient.replyMessage({ replyToken, messages: msgs.slice(0, 5) });
+  } catch (err) { console.error("[老師訊號]", err.message); }
 }
 
 app.post("/webhook", async function(req, res) {
