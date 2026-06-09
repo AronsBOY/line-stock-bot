@@ -1,10 +1,11 @@
 const CODE_NAMES = {
-  "2351":"順德","3167":"大量","3211":"順達","3533":"嘉澤",
-  "3535":"晶彩科","3563":"牧德","3715":"定穎","4749":"新應材",
+  "2327":"國巨","2351":"順德","3037":"欣興","3167":"大量",
+  "3211":"順達","3533":"嘉澤","3535":"晶彩科","3563":"牧德",
+  "3715":"定穎","4749":"新應材","4760":"永記","4966":"譜瑞KY",
   "4971":"IET-KY","4989":"形將","5347":"世界","5475":"德宏",
-  "6739":"竹陞科技","6788":"華景電","7734":"印能","1802":"玻玻",
-  "2368":"金像電","3450":"聯鈞","3665":"貿聯KY","8358":"金居",
-  "1560":"中砂"
+  "6261":"久元","6415":"矽力KY","6739":"竹陞科技","6788":"華景電",
+  "7734":"印能","8227":"巨有","1802":"玻玻","2368":"金像電",
+  "3450":"聯鈞","3665":"貿聯KY","8358":"金居","1560":"中砂"
 };
 
 const portfolio = {
@@ -25,9 +26,9 @@ const portfolio = {
     {id:14,code:"3535",name:"晶彩科",date:"2026-04-13",price:130},
     {id:15,code:"3715",name:"定穎",date:"2026-04-15",price:188},
     {id:16,code:"3715",name:"定穎",date:"2026-04-20",price:198},
-    {id:17,code:"4749",name:"新應材",date:"2026-04-23",price:976},
-    {id:18,code:"4749",name:"新應材",date:"2026-04-24",price:981},
-    {id:19,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
+    {id:17,code:"3715",name:"定穎",date:"2026-05-08",price:182.5},
+    {id:18,code:"4749",name:"新應材",date:"2026-04-23",price:976},
+    {id:19,code:"4749",name:"新應材",date:"2026-04-24",price:981},
     {id:20,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
     {id:21,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
     {id:22,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
@@ -35,33 +36,69 @@ const portfolio = {
     {id:24,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
     {id:25,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
     {id:26,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
-    {id:27,code:"4989",name:"形將",date:"2026-05-05",price:104},
-    {id:28,code:"5475",name:"德宏",date:"2026-03-18",price:212},
-    {id:29,code:"5475",name:"德宏",date:"2026-03-19",price:212},
-    {id:30,code:"5475",name:"德宏",date:"2026-03-24",price:192},
-    {id:31,code:"6739",name:"竹陞科技",date:"2026-04-13",price:1480},
-    {id:32,code:"6739",name:"竹陞科技",date:"2026-04-13",price:1510},
-    {id:33,code:"7734",name:"印能",date:"2026-03-18",price:1900},
-    {id:34,code:"7734",name:"印能",date:"2026-03-20",price:1855},
+    {id:27,code:"4971",name:"IET-KY",date:"2026-03-16",price:333},
+    {id:28,code:"4989",name:"形將",date:"2026-05-05",price:104},
+    {id:29,code:"5475",name:"德宏",date:"2026-03-18",price:212},
+    {id:30,code:"5475",name:"德宏",date:"2026-03-19",price:212},
+    {id:31,code:"5475",name:"德宏",date:"2026-03-24",price:192},
+    {id:32,code:"6739",name:"竹陞科技",date:"2026-04-13",price:1480},
+    {id:33,code:"6739",name:"竹陞科技",date:"2026-04-13",price:1510},
+    {id:34,code:"7734",name:"印能",date:"2026-03-18",price:1900},
     {id:35,code:"7734",name:"印能",date:"2026-03-20",price:1855},
-    {id:36,code:"7734",name:"印能",date:"2026-03-24",price:1660},
-    {id:37,code:"1802",name:"玻玻",date:"2026-03-23",price:51.9},
-    {id:38,code:"3167",name:"大量",date:"2026-03-18",price:349},
-    {id:39,code:"3167",name:"大量",date:"2026-03-24",price:317},
+    {id:36,code:"7734",name:"印能",date:"2026-03-20",price:1855},
+    {id:37,code:"7734",name:"印能",date:"2026-03-24",price:1660},
+    {id:38,code:"1802",name:"玻玻",date:"2026-03-23",price:51.9},
+    {id:39,code:"3167",name:"大量",date:"2026-03-18",price:349},
+    {id:40,code:"3167",name:"大量",date:"2026-03-24",price:317},
+    {id:41,code:"2327",name:"國巨",date:"2026-06-05",price:690},
+    {id:42,code:"2327",name:"國巨",date:"2026-06-05",price:710},
+    {id:43,code:"3037",name:"欣興",date:"2026-06-05",price:930},
+    {id:44,code:"3037",name:"欣興",date:"2026-06-08",price:902},
+    {id:45,code:"4760",name:"永記",date:"2026-06-03",price:407},
+    {id:46,code:"4760",name:"永記",date:"2026-06-05",price:400},
+    {id:47,code:"4760",name:"永記",date:"2026-06-08",price:385},
+    {id:48,code:"4966",name:"譜瑞KY",date:"2026-06-05",price:744},
+    {id:49,code:"6261",name:"久元",date:"2026-05-26",price:119.5},
+    {id:50,code:"6415",name:"矽力KY",date:"2026-05-28",price:629},
+    {id:51,code:"6415",name:"矽力KY",date:"2026-06-02",price:593},
+    {id:52,code:"8227",name:"巨有",date:"2026-05-15",price:207},
+    {id:53,code:"8227",name:"巨有",date:"2026-05-27",price:219},
+    {id:54,code:"8227",name:"巨有",date:"2026-05-28",price:215},
   ],
   sells: [
-    {id:50,code:"1802",name:"玻玻",date:"2026-04-16",price:64.1},
-    {id:51,code:"3167",name:"大量",date:"2026-04-16",price:698},
-    {id:52,code:"3167",name:"大量",date:"2026-04-16",price:698},
-    {id:53,code:"5475",name:"德宏",date:"2026-04-14",price:316},
-    {id:54,code:"7734",name:"印能",date:"2026-04-23",price:3150},
-    {id:55,code:"7734",name:"印能",date:"2026-04-23",price:3150},
-    {id:56,code:"3535",name:"晶彩科",date:"2026-05-05",price:136},
-    {id:57,code:"3535",name:"晶彩科",date:"2026-05-05",price:136},
+    {id:100,code:"1802",name:"玻玻",date:"2026-04-16",price:64.1},
+    {id:101,code:"3167",name:"大量",date:"2026-04-16",price:698},
+    {id:102,code:"3167",name:"大量",date:"2026-04-16",price:698},
+    {id:103,code:"5475",name:"德宏",date:"2026-04-14",price:316},
+    {id:104,code:"7734",name:"印能",date:"2026-04-23",price:3150},
+    {id:105,code:"7734",name:"印能",date:"2026-04-23",price:3150},
+    {id:106,code:"3535",name:"晶彩科",date:"2026-05-05",price:136},
+    {id:107,code:"3535",name:"晶彩科",date:"2026-05-05",price:136},
+    {id:108,code:"4749",name:"新應材",date:"2026-05-01",price:0},
+    {id:109,code:"4749",name:"新應材",date:"2026-05-01",price:0},
+    {id:110,code:"3211",name:"順達",date:"2026-05-01",price:0},
+    {id:111,code:"3211",name:"順達",date:"2026-05-01",price:0},
+    {id:112,code:"3211",name:"順達",date:"2026-05-01",price:0},
+    {id:113,code:"3211",name:"順達",date:"2026-05-01",price:0},
+    {id:114,code:"4971",name:"IET-KY",date:"2026-05-01",price:0},
+    {id:115,code:"4971",name:"IET-KY",date:"2026-05-01",price:0},
+    {id:116,code:"4971",name:"IET-KY",date:"2026-05-01",price:0},
+    {id:117,code:"4971",name:"IET-KY",date:"2026-05-01",price:0},
+    {id:118,code:"4971",name:"IET-KY",date:"2026-05-01",price:0},
+    {id:119,code:"2351",name:"順德",date:"2026-05-01",price:0},
+    {id:120,code:"2351",name:"順德",date:"2026-05-01",price:0},
+    {id:121,code:"2351",name:"順德",date:"2026-05-01",price:0},
   ]
 };
 
 let nextId = 200;
+
+function setName(code, name) {
+  CODE_NAMES[code] = name;
+  portfolio.buys.filter(function(b) { return b.code === code; }).forEach(function(b) { b.name = name; });
+  portfolio.sells.filter(function(s) { return s.code === code; }).forEach(function(s) { s.name = name; });
+  return "已設定 " + code + " 名稱為「" + name + "」";
+}
 
 function addBuy(code, name, date, price) {
   const n = CODE_NAMES[code] || name || code;
@@ -89,14 +126,28 @@ function adjustPrice(code, date, newPrice) {
   return "找不到 " + code + " " + date + " 的記錄";
 }
 
+function getBackup() {
+  const now = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
+  let txt = "=== 持股備份 " + now + " ===\n\n【買入記錄】\n";
+  portfolio.buys.forEach(function(b) {
+    txt += "新增 " + b.code + " " + b.date + " " + b.price + "\n";
+  });
+  txt += "\n【賣出記錄】\n";
+  portfolio.sells.forEach(function(s) {
+    txt += "賣出 " + s.code + " " + s.date + " " + s.price + " 1\n";
+  });
+  txt += "\n=== 備份結束 ===";
+  return txt;
+}
+
 function getGroups() {
   const g = {};
   portfolio.buys.forEach(function(b) {
-    if (!g[b.code]) g[b.code] = { code: b.code, name: b.name, buys: [], sells: [] };
+    if (!g[b.code]) g[b.code] = { code: b.code, name: CODE_NAMES[b.code] || b.name, buys: [], sells: [] };
     g[b.code].buys.push(b);
   });
   portfolio.sells.forEach(function(s) {
-    if (!g[s.code]) g[s.code] = { code: s.code, name: s.name, buys: [], sells: [] };
+    if (!g[s.code]) g[s.code] = { code: s.code, name: CODE_NAMES[s.code] || s.name, buys: [], sells: [] };
     g[s.code].sells.push(s);
   });
   return Object.values(g);
@@ -117,7 +168,8 @@ function getHoldingSummary(livePrices) {
     const costTotal = avg * qty * 1000;
     if (pnlTotal !== null) totalPnl += pnlTotal;
     totalCost += costTotal;
-    let line = g.code + " " + g.name + "　持股：" + qty + " 張\n";
+    const name = CODE_NAMES[g.code] || g.name;
+    let line = g.code + " " + name + "　持股：" + qty + " 張\n";
     line += "  均價：" + avg.toFixed(2) + "　成本：" + Math.round(costTotal).toLocaleString() + " 元\n";
     g.buys.forEach(function(b, i) { line += "  " + (i+1) + ". " + b.date + " " + b.price.toFixed(2) + "\n"; });
     if (g.sells.length > 0) line += "  已賣出：" + g.sells.length + " 張\n";
@@ -146,7 +198,8 @@ function getSettledSummary() {
     const pnl = (avgSell - avgBuy) * qty * 1000;
     const pct = (avgSell - avgBuy) / avgBuy * 100;
     totalPnl += pnl;
-    return g.code + " " + g.name + " " + (pnl >= 0 ? "獲利" : "虧損") + "　共 " + qty + " 張\n" +
+    const name = CODE_NAMES[g.code] || g.name;
+    return g.code + " " + name + " " + (pnl >= 0 ? "獲利" : "虧損") + "　共 " + qty + " 張\n" +
       "  均買：" + avgBuy.toFixed(2) + "　均賣：" + avgSell.toFixed(2) + "\n" +
       "  已實現損益：" + (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + " 元 (" + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
   });
@@ -155,4 +208,4 @@ function getSettledSummary() {
     "\n合計：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
 }
 
-module.exports = { addBuy, addSell, cancelEntry, adjustPrice, getHoldingSummary, getSettledSummary, portfolio, CODE_NAMES };
+module.exports = { addBuy, addSell, cancelEntry, adjustPrice, setName, getBackup, getHoldingSummary, getSettledSummary, portfolio, CODE_NAMES };
