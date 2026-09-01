@@ -6,6 +6,8 @@ const { parseSingleMessage } = require("./signalParser");
 const { fetchStockPrice, fetchHistoricalPrice, fetchMultipleStocks, formatFlexMessage } = require("./stockPrice");
 const { setupScheduler, addSignal } = require("./scheduler");
 const portfolio = require("./portfolio");
+const pendingSignals = require("./pendingSignals");
+const { migrate } = require("./migrate");
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -20,14 +22,18 @@ const app = express();
 app.use("/webhook", line.middleware(lineConfig));
 app.get("/", function(req, res) { res.json({ status: "running" }); });
 
-const pendingSignals = {};
-
 function isTimeFormat(str) { return /^\d{1,2}:\d{2}$/.test(str); }
 function isPriceFormat(str) { return /^[\d.]+$/.test(str); }
 function isTeacher(name) {
   const t = process.env.SIGNAL_SENDER_NAME || "";
   if (!t) return false;
   return name.includes(t) || t.includes(name);
+}
+function extractGroupTag(text) {
+  // 從指令句尾抓「基本組」「進階組」，抓到就從文字裡拿掉，不影響原本指令解析
+  const m = text.match(/\s*(基本組|進階組)\s*$/);
+  if (m) return { text: text.slice(0, m.index).trim(), group: m[1] };
+  return { text: text, group: null };
 }
 
 async function handleEvent(event) {
@@ -62,7 +68,7 @@ async function handleEvent(event) {
     if (p) {
       const arrow = p.isUp ? "▲" : "▼";
       const label = qDate ? (qTime ? qTime + " 歷史價" : "收盤價") : p.marketStatus;
-      const name = portfolio.CODE_NAMES[code] || p.longName || code;
+      const name = portfolio.getName(code) || p.longName || code;
       const msg = code + " " + name + "\n" + label + "：" + p.price + " TWD\n" +
         arrow + " " + Math.abs(p.change) + " (" + Math.abs(p.changePct) + "%)\n" +
         (p.high ? "最高：" + p.high + "　最低：" + p.low + "\n" : "") + p.timestamp;
@@ -76,8 +82,8 @@ async function handleEvent(event) {
   // ── 股票名稱設定 ──
   const nameMatch = text.match(/^名稱\s+(\d{4,6})\s+(.+)$/);
   if (nameMatch) {
-    const result = portfolio.setName(nameMatch[1], nameMatch[2].trim());
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: result + "\n（重啟後需更新 portfolio.js 的 CODE_NAMES 才能永久保存）" }] });
+    const result = await portfolio.setName(nameMatch[1], nameMatch[2].trim());
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: result }] });
     return;
   }
 
@@ -85,7 +91,7 @@ async function handleEvent(event) {
   const newsMatch = text.match(/^新聞\s+(\d{4,6})$/);
   if (newsMatch) {
     const code = newsMatch[1];
-    const name = portfolio.CODE_NAMES[code] || code;
+    const name = portfolio.getName(code) || code;
     try {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢 " + code + " " + name + " 資訊中..." }] });
       const resp = await anthropic.messages.create({
@@ -102,11 +108,12 @@ async function handleEvent(event) {
   }
 
   // ── 確認訊號 ──
-  const confirmMatch = text.match(/^確認\s+(\d{4,6})(?:\s+([\d.]+))?$/);
+  const confirmExtract = extractGroupTag(text);
+  const confirmMatch = confirmExtract.text.match(/^確認\s+(\d{4,6})(?:\s+([\d.]+))?$/);
   if (confirmMatch) {
     const code = confirmMatch[1];
     const manualPrice = confirmMatch[2] ? parseFloat(confirmMatch[2]) : null;
-    const pending = pendingSignals[code];
+    const pending = await pendingSignals.getPending(code);
     if (!pending) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "找不到 " + code + " 的待確認訊號" }] });
       return;
@@ -116,11 +123,12 @@ async function handleEvent(event) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "請提供成交價：\n確認 " + code + " 價格" }] });
       return;
     }
-    if (pending.action === "買入") portfolio.addBuy(code, code, pending.date, finalPrice);
-    else portfolio.addSell(code, code, pending.date, finalPrice);
-    delete pendingSignals[code];
+    const finalGroup = confirmExtract.group || pending.group;
+    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
+    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
+    await pendingSignals.deletePending(code);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
-      "✅ 已記錄\n" + code + " " + (portfolio.CODE_NAMES[code] || "") + " " + pending.action + "\n" +
+      "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (finalGroup ? "【" + finalGroup + "】" : "") + "\n" +
       "日期：" + pending.date + " " + pending.time + "\n" +
       "成交價：" + finalPrice + (manualPrice ? "（手動）" : "（歷史）")
     }] });
@@ -129,20 +137,19 @@ async function handleEvent(event) {
 
   // ── 確認全部 ──
   if (text === "確認全部") {
-    const keys = Object.keys(pendingSignals);
-    if (!keys.length) {
+    const all = await pendingSignals.getAllPending();
+    if (!all.length) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "目前沒有待確認的訊號" }] });
       return;
     }
     const failed = [];
-    keys.forEach(function(code) {
-      const p = pendingSignals[code];
-      if (!p.price) { failed.push(code); return; }
-      if (p.action === "買入") portfolio.addBuy(code, code, p.date, p.price);
-      else portfolio.addSell(code, code, p.date, p.price);
-      delete pendingSignals[code];
-    });
-    let msg = "✅ 已記錄 " + (keys.length - failed.length) + " 筆";
+    for (const p of all) {
+      if (!p.price) { failed.push(p.code); continue; }
+      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
+      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
+      await pendingSignals.deletePending(p.code);
+    }
+    let msg = "✅ 已記錄 " + (all.length - failed.length) + " 筆";
     if (failed.length) msg += "\n⚠ 缺少股價：\n" + failed.map(function(c) { return "確認 " + c + " 價格"; }).join("\n");
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
@@ -150,14 +157,13 @@ async function handleEvent(event) {
 
   // ── 待確認清單 ──
   if (text === "待確認") {
-    const keys = Object.keys(pendingSignals);
-    if (!keys.length) {
+    const all = await pendingSignals.getAllPending();
+    if (!all.length) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "目前沒有待確認的訊號" }] });
       return;
     }
-    const list = keys.map(function(code) {
-      const p = pendingSignals[code];
-      return code + " " + (portfolio.CODE_NAMES[code] || "") + " " + p.action +
+    const list = all.map(function(p) {
+      return p.code + " " + (portfolio.getName(p.code) || "") + " " + p.action + (p.group ? "【" + p.group + "】" : "") +
         (p.price ? " @" + p.price : " ⚠無股價") + "（" + p.date + " " + p.time + "）";
     }).join("\n");
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "待確認訊號：\n" + list + "\n\n回覆「確認 代號」或「確認全部」" }] });
@@ -166,13 +172,14 @@ async function handleEvent(event) {
 
   // ── 備份 ──
   if (text === "備份") {
-    const backup = portfolio.getBackup();
+    const backup = await portfolio.getBackup();
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: backup }] });
     return;
   }
 
   // ── 買入 ──
-  const buyMatch = text.match(/^買\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})(?:\s+(.+))?$/);
+  const buyExtract = extractGroupTag(text);
+  const buyMatch = buyExtract.text.match(/^買\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})(?:\s+(.+))?$/);
   if (buyMatch) {
     const code = buyMatch[1], bDate = buyMatch[2], last = buyMatch[3] ? buyMatch[3].trim() : null;
     let price = null;
@@ -180,13 +187,14 @@ async function handleEvent(event) {
     else if (isTimeFormat(last)) { const p = await fetchHistoricalPrice(code, bDate, last); price = p ? p.price : null; }
     else if (isPriceFormat(last)) { price = parseFloat(last); }
     if (!price) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得股價，請手動填入：\n買 " + code + " " + bDate + " 價格" }] }); return; }
-    portfolio.addBuy(code, code, bDate, price);
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄買入\n" + code + " " + (portfolio.CODE_NAMES[code] || "") + "\n" + bDate + " @" + price }] });
+    await portfolio.addBuy(code, code, bDate, price, null, null, buyExtract.group);
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄買入\n" + code + " " + (portfolio.getName(code) || "") + (buyExtract.group ? "【" + buyExtract.group + "】" : "") + "\n" + bDate + " @" + price }] });
     return;
   }
 
   // ── 賣出 ──
-  const sellMatch = text.match(/^賣\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})(?:\s+(.+))?$/);
+  const sellExtract = extractGroupTag(text);
+  const sellMatch = sellExtract.text.match(/^賣\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})(?:\s+(.+))?$/);
   if (sellMatch) {
     const code = sellMatch[1], sDate = sellMatch[2], last = sellMatch[3] ? sellMatch[3].trim() : null;
     let price = null, qtyStr = "全部";
@@ -195,39 +203,37 @@ async function handleEvent(event) {
     else if (last === "一半" || last === "全部") { const p = await fetchHistoricalPrice(code, sDate, null); price = p ? p.price : null; qtyStr = last; }
     else if (isPriceFormat(last)) { price = parseFloat(last); }
     if (!price) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "無法取得股價" }] }); return; }
-    const holdCount = portfolio.portfolio.buys.filter(function(b) { return b.code === code; }).length;
-    const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
-    const remaining = holdCount - soldCount;
+    const { remaining } = await portfolio.getRemaining(code);
     if (remaining <= 0) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: code + " 目前無持股可賣" }] }); return; }
     let qty = remaining;
     if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
     else if (!isNaN(parseInt(qtyStr))) qty = Math.min(parseInt(qtyStr), remaining);
-    for (let i = 0; i < qty; i++) portfolio.addSell(code, code, sDate, price);
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出\n" + code + " " + (portfolio.CODE_NAMES[code] || "") + " ×" + qty + "張 @" + price + "\n剩餘：" + (remaining - qty) + " 張" }] });
+    for (let i = 0; i < qty; i++) await portfolio.addSell(code, code, sDate, price, null, null, sellExtract.group);
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出\n" + code + " " + (portfolio.getName(code) || "") + (sellExtract.group ? "【" + sellExtract.group + "】" : "") + " ×" + qty + "張 @" + price + "\n剩餘：" + (remaining - qty) + " 張" }] });
     return;
   }
 
   // ── 新增（舊格式）──
-  const fullBuyMatch = text.match(/^新增\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
+  const fullBuyExtract = extractGroupTag(text);
+  const fullBuyMatch = fullBuyExtract.text.match(/^新增\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
   if (fullBuyMatch) {
-    portfolio.addBuy(fullBuyMatch[1], fullBuyMatch[1], fullBuyMatch[2], fullBuyMatch[3]);
+    await portfolio.addBuy(fullBuyMatch[1], fullBuyMatch[1], fullBuyMatch[2], fullBuyMatch[3], null, null, fullBuyExtract.group);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已新增買入 " + fullBuyMatch[1] + " " + fullBuyMatch[2] + " @" + fullBuyMatch[3] }] });
     return;
   }
 
   // ── 賣出（舊格式）──
-  const fullSellMatch = text.match(/^賣出\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)(?:\s+(.+))?/);
+  const fullSellExtract = extractGroupTag(text);
+  const fullSellMatch = fullSellExtract.text.match(/^賣出\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)(?:\s+(.+))?/);
   if (fullSellMatch) {
     const code = fullSellMatch[1], fsDate = fullSellMatch[2], fsPrice = fullSellMatch[3];
     const qtyStr = fullSellMatch[4] ? fullSellMatch[4].trim() : "1";
-    const holdCount = portfolio.portfolio.buys.filter(function(b) { return b.code === code; }).length;
-    const soldCount = portfolio.portfolio.sells.filter(function(s) { return s.code === code; }).length;
-    const remaining = holdCount - soldCount;
+    const { remaining } = await portfolio.getRemaining(code);
     let qty = 1;
     if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
     else if (qtyStr === "全部") qty = remaining;
     else qty = Math.min(parseInt(qtyStr) || 1, remaining);
-    for (let i = 0; i < qty; i++) portfolio.addSell(code, code, fsDate, fsPrice);
+    for (let i = 0; i < qty; i++) await portfolio.addSell(code, code, fsDate, fsPrice, null, null, fullSellExtract.group);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出 " + code + " ×" + qty + "張 @" + fsPrice }] });
     return;
   }
@@ -235,7 +241,7 @@ async function handleEvent(event) {
   // ── 調整價格 ──
   const adjustMatch = text.match(/^調整\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)/);
   if (adjustMatch) {
-    const result = portfolio.adjustPrice(adjustMatch[1], adjustMatch[2], adjustMatch[3]);
+    const result = await portfolio.adjustPrice(adjustMatch[1], adjustMatch[2], adjustMatch[3]);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: result }] });
     return;
   }
@@ -243,7 +249,7 @@ async function handleEvent(event) {
   // ── 取消 ──
   const cancelMatch = text.match(/^取消\s+(\d{4,6})\s+(\d{4}-\d{2}-\d{2})/);
   if (cancelMatch) {
-    const result = portfolio.cancelEntry(cancelMatch[1], cancelMatch[2]);
+    const result = await portfolio.cancelEntry(cancelMatch[1], cancelMatch[2]);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: result }] });
     return;
   }
@@ -252,27 +258,28 @@ async function handleEvent(event) {
   if (text === "持股" || text === "我的持股") {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
     try {
-      const allCodes = [...new Set(portfolio.portfolio.buys.map(function(b) { return b.code; }))];
-      const livePrices = {};
-      for (let i = 0; i < allCodes.length; i++) {
-        const r = await fetchMultipleStocks([allCodes[i]]);
-        if (r[allCodes[i]]) livePrices[allCodes[i]] = r[allCodes[i]];
-      }
-      const msg = portfolio.getHoldingSummary(livePrices);
+      const allCodes = await portfolio.getHeldCodes();
+      const livePrices = await fetchMultipleStocks(allCodes);
+      const msg = await portfolio.getHoldingSummary(livePrices);
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
     } catch (err) { console.error("[持股]", err.message); }
     return;
   }
 
-  // ── 結算 ──
-  if (text === "結算" || text === "已結算") {
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: portfolio.getSettledSummary() }] });
+  // ── 明細（條列式查看每筆買賣）──
+  const detailMatch = text.match(/^明細\s+(\d{4,6})(?:\s+(基本組|進階組))?$/);
+  if (detailMatch) {
+    const code = detailMatch[1];
+    const groupFilter = detailMatch[2] || null;
+    const entries = await portfolio.getTransactionList(code, groupFilter);
+    const msg = portfolio.formatTransactionList(code, portfolio.getName(code), entries);
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
 
-  // ── 備份 ──
-  if (text === "備份") {
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: portfolio.getBackup() }] });
+  // ── 結算 ──
+  if (text === "結算" || text === "已結算") {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: await portfolio.getSettledSummary() }] });
     return;
   }
 
@@ -283,7 +290,8 @@ async function handleEvent(event) {
       "【偵測確認】\n確認 5475　確認 5475 158　確認全部　待確認\n\n" +
       "【買賣記錄】\n買 3533 2026-04-23 10:04\n買 3533 2026-04-23\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
-      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n持股\n結算\n備份";
+      "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
+      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
@@ -294,16 +302,17 @@ async function handleEvent(event) {
   try {
     const signals = await parseSingleMessage(senderName, timeStr, text);
     if (signals.length === 0) return;
+    const detectedGroup = pendingSignals.detectGroup(text);
     const msgs = [];
     for (let i = 0; i < signals.length; i++) {
       const sig = signals[i];
       const code = sig.stock_code;
       const p = await fetchHistoricalPrice(code, dateStr, timeStr);
       const price = p ? p.price : null;
-      pendingSignals[code] = { action: sig.action, date: dateStr, time: timeStr, price, suggestedPrice: sig.suggested_price, original: sig.original };
+      await pendingSignals.setPending(code, { action: sig.action, date: dateStr, time: timeStr, price, suggestedPrice: sig.suggested_price, original: sig.original, group: detectedGroup });
       const msg =
         "📊 偵測到訊號\n" + "━".repeat(16) + "\n" +
-        code + " " + (sig.stock_name || portfolio.CODE_NAMES[code] || "") + " " + sig.action + "\n" +
+        code + " " + (sig.stock_name || portfolio.getName(code) || "") + " " + sig.action + (detectedGroup ? "【" + detectedGroup + "】" : "") + "\n" +
         "時間：" + dateStr + " " + timeStr + "\n" +
         (sig.suggested_price ? "老師建議價：" + sig.suggested_price + "\n" : "") +
         (price ? "歷史成交價：" + price : "⚠ 股價查詢失敗") + "\n" +
@@ -322,7 +331,17 @@ app.post("/webhook", async function(req, res) {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, function() {
-  console.log("LINE Stock Bot 啟動 Port:" + PORT);
-  setupScheduler(lineClient);
-});
+
+(async function start() {
+  try {
+    await migrate();
+    await portfolio.loadNameCache();
+    app.listen(PORT, function() {
+      console.log("LINE Stock Bot 啟動 Port:" + PORT);
+      setupScheduler(lineClient);
+    });
+  } catch (err) {
+    console.error("[Startup] 啟動失敗：", err.message);
+    process.exit(1);
+  }
+})();
