@@ -30,6 +30,12 @@ function isTeacher(name) {
   if (!t) return false;
   return name.includes(t) || t.includes(name);
 }
+function isAdmin(name) {
+  // 這三個管理指令（回補歷史/模擬帳戶）除了老師本人，也允許 ADMIN_NAMES 環境變數裡列出的人
+  if (isTeacher(name)) return true;
+  const admins = (process.env.ADMIN_NAMES || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+  return admins.some(function (a) { return name.includes(a) || a.includes(name); });
+}
 function extractGroupTag(text) {
   // 從指令句尾抓「基本組」「進階組」，抓到就從文字裡拿掉，不影響原本指令解析
   const m = text.match(/\s*(基本組|進階組)\s*$/);
@@ -39,6 +45,38 @@ function extractGroupTag(text) {
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+function chunkMessage(text, maxLen) {
+  maxLen = maxLen || 4500; // 保留餘裕，LINE單則上限約5000字
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let cut = remaining.lastIndexOf("\n\n", maxLen);
+    if (cut <= 0) cut = remaining.lastIndexOf("\n", maxLen);
+    if (cut <= 0) cut = maxLen;
+    chunks.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+async function pushLongMessage(to, text) {
+  const chunks = chunkMessage(text);
+  // LINE 一次 pushMessage 最多只能帶 5 則，超過的部分分批送、中間留一點間隔
+  for (let i = 0; i < chunks.length; i += 5) {
+    const batch = chunks.slice(i, i + 5).map(function (c) { return { type: "text", text: c }; });
+    await lineClient.pushMessage({ to: to, messages: batch });
+    if (i + 5 < chunks.length) await sleep(500);
+  }
+}
+
+async function replyLongMessage(replyToken, to, text) {
+  const chunks = chunkMessage(text);
+  const firstBatch = chunks.slice(0, 5).map(function (c) { return { type: "text", text: c }; });
+  await lineClient.replyMessage({ replyToken: replyToken, messages: firstBatch });
+  if (chunks.length > 5) await pushLongMessage(to, chunks.slice(5).join("\n\n"));
+}
+
 async function runHistoricalBackfill() {
   let inserted = 0, skippedDup = 0, skippedNoPrice = 0, failed = 0;
   for (const sig of HISTORICAL_SIGNALS) {
@@ -46,22 +84,22 @@ async function runHistoricalBackfill() {
       const dateStr = sig.source_date;
       const existing = await portfolio.findExisting(sig.stock_code, dateStr);
       const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
-      if (sameSide.length > 0) { skippedDup++; await sleep(400); continue; }
+      if (sameSide.length > 0) { skippedDup++; await sleep(1100); continue; }
       if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
       const p = await fetchHistoricalPrice(sig.stock_code, dateStr, null);
-      if (!p) { skippedNoPrice++; await sleep(400); continue; }
+      if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
       } else {
-        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
       }
       inserted++;
     } catch (err) {
       failed++;
       console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
     }
-    await sleep(400); // 節流，避免對股價來源打太快
+    await sleep(1100); // 節流，配合Fugle免費版 60次/分鐘 的限制
   }
   return { inserted, skippedDup, skippedNoPrice, failed, total: HISTORICAL_SIGNALS.length };
 }
@@ -83,7 +121,7 @@ async function runSimulation(capital) {
       const p = await fetchHistoricalPrice(sig.stock_code, sig.source_date, null);
       price = p ? p.price : null;
       priceCache[cacheKey] = price;
-      await sleep(400);
+      await sleep(1100);
     }
     if (price === null) { skippedNoPrice.push(sig.stock_code + " " + sig.source_date); continue; }
 
@@ -114,7 +152,7 @@ async function runSimulation(capital) {
     const lots = holdings[code];
     if (lots.length === 0) continue;
     const p = await fetchStockPrice(code, null, null);
-    await sleep(400);
+    await sleep(1100);
     const curPrice = p ? p.price : null;
     const avgCost = lots.reduce(function (a, b) { return a + b.price; }, 0) / lots.length;
     if (curPrice !== null) {
@@ -254,8 +292,8 @@ async function handleEvent(event) {
       return;
     }
     const finalGroup = confirmExtract.group || pending.group;
-    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
-    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
+    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
+    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
     await pendingSignals.deletePending(code);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
       "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (finalGroup ? "【" + finalGroup + "】" : "") + "\n" +
@@ -275,8 +313,8 @@ async function handleEvent(event) {
     const failed = [];
     for (const p of all) {
       if (!p.price) { failed.push(p.code); continue; }
-      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
-      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
+      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
+      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
       await pendingSignals.deletePending(p.code);
     }
     let msg = "✅ 已記錄 " + (all.length - failed.length) + " 筆";
@@ -296,14 +334,14 @@ async function handleEvent(event) {
       return p.code + " " + (portfolio.getName(p.code) || "") + " " + p.action + (p.group ? "【" + p.group + "】" : "") +
         (p.price ? " @" + p.price : " ⚠無股價") + "（" + p.date + " " + p.time + "）";
     }).join("\n");
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "待確認訊號：\n" + list + "\n\n回覆「確認 代號」或「確認全部」" }] });
+    await replyLongMessage(replyToken, sourceId, "待確認訊號：\n" + list + "\n\n回覆「確認 代號」或「確認全部」");
     return;
   }
 
   // ── 備份 ──
   if (text === "備份") {
     const backup = await portfolio.getBackup();
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: backup }] });
+    await replyLongMessage(replyToken, sourceId, backup);
     return;
   }
 
@@ -388,11 +426,15 @@ async function handleEvent(event) {
   if (text === "持股" || text === "我的持股") {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
     try {
-      const allCodes = await portfolio.getHeldCodes();
-      const livePrices = await fetchMultipleStocks(allCodes);
-      const msg = await portfolio.getHoldingSummary(livePrices);
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
-    } catch (err) { console.error("[持股]", err.message); }
+      const allEpisodes = await portfolio.getAllEpisodes();
+      const openCodes = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
+      const livePrices = await fetchMultipleStocks(openCodes);
+      const msg = await portfolio.getHoldingSummaryByEpisode(allEpisodes, livePrices);
+      await pushLongMessage(sourceId, msg);
+    } catch (err) {
+      console.error("[持股]", err.message);
+      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "查詢持股時發生錯誤：" + err.message }] }); } catch (e) {}
+    }
     return;
   }
 
@@ -403,20 +445,26 @@ async function handleEvent(event) {
     const groupFilter = detailMatch[2] || null;
     const entries = await portfolio.getTransactionList(code, groupFilter);
     const msg = portfolio.formatTransactionList(code, portfolio.getName(code), entries);
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
+    await replyLongMessage(replyToken, sourceId, msg);
     return;
   }
 
   // ── 結算 ──
   if (text === "結算" || text === "已結算") {
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: await portfolio.getSettledSummary() }] });
+    try {
+      const settled = await portfolio.getSettledSummaryByEpisode();
+      await replyLongMessage(replyToken, sourceId, settled.profitText + "\n\n" + settled.lossText + settled.footer);
+    } catch (err) {
+      console.error("[結算]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢結算時發生錯誤：" + err.message }] });
+    }
     return;
   }
 
-  // ── 回補歷史（僅限老師本人觸發，背景執行，完成後主動通知）──
+  // ── 回補歷史（僅限老師本人或管理員觸發，背景執行，完成後主動通知）──
   if (text === "回補歷史") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始回補歷史訊號，共 " + HISTORICAL_SIGNALS.length + " 筆，預計需要幾分鐘，完成後會通知你" }] });
@@ -440,8 +488,8 @@ async function handleEvent(event) {
 
   // ── 模擬帳戶（無限資金）──
   if (text === "模擬無限資金") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（無限資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
@@ -457,8 +505,8 @@ async function handleEvent(event) {
 
   // ── 模擬帳戶（1000萬資金上限）──
   if (text === "模擬1000萬") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（1000萬資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
