@@ -28,19 +28,19 @@ async function setName(code, name) {
   return "已設定 " + code + " 名稱為「" + name + "」（已永久保存）";
 }
 
-async function addBuy(code, name, date, price, signalTime, note, groupTag) {
+async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null]
+    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null]
   );
 }
 
-async function addSell(code, name, date, price, signalTime, note, groupTag) {
+async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null]
+    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null]
   );
 }
 
@@ -272,10 +272,180 @@ function formatTransactionList(code, name, entries) {
   return txt.trim();
 }
 
+// ══════════════════════════════════════════
+// 輪次邏輯：把每檔股票的買賣紀錄，依時間順序切成一輪一輪
+// 持股歸零＝一輪結束（已結算），歸零後的新買入＝開新的一輪（可能還在持股中）
+// ══════════════════════════════════════════
+
+async function getAllRawEvents() {
+  const buys = (await pool.query(
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, id
+     FROM buys ORDER BY trade_date, signal_time NULLS FIRST, id`
+  )).rows;
+  const sells = (await pool.query(
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, id
+     FROM sells ORDER BY trade_date, signal_time NULLS FIRST, id`
+  )).rows;
+  const byCode = {};
+  function ensure(code) { if (!byCode[code]) byCode[code] = { buys: [], sells: [] }; return byCode[code]; }
+  buys.forEach(function (b) {
+    ensure(b.code).buys.push({
+      type: "買", date: b.trade_date, time: b.signal_time, price: parseFloat(b.price),
+      note: b.note, group: b.group_tag, suggestedPrice: b.suggested_price, id: b.id,
+    });
+  });
+  sells.forEach(function (s) {
+    ensure(s.code).sells.push({
+      type: "賣", date: s.trade_date, time: s.signal_time, price: parseFloat(s.price),
+      note: s.note, group: s.group_tag, suggestedPrice: s.suggested_price, id: s.id,
+    });
+  });
+  return byCode;
+}
+
+function sortKey(e) {
+  return e.date + " " + (e.time || "00:00") + " " + String(e.id).padStart(8, "0");
+}
+
+// 把單一股票的買賣事件切成輪次；回傳 { closedEpisodes: [...], openEpisode: {...}|null, orphanSells: [...] }
+function buildEpisodes(rawEvents) {
+  const events = rawEvents.buys.concat(rawEvents.sells);
+  events.sort(function (a, b) { return sortKey(a) < sortKey(b) ? -1 : 1; });
+
+  const closedEpisodes = [];
+  const orphanSells = [];
+  let current = null;
+
+  events.forEach(function (e) {
+    if (e.type === "買") {
+      if (!current) current = { entries: [], qty: 0 };
+      current.entries.push(e);
+      current.qty++;
+    } else {
+      if (!current || current.qty <= 0) {
+        orphanSells.push(e); // 沒有對應持股的賣出訊號，資料異常，不算進任何一輪
+        return;
+      }
+      current.entries.push(e);
+      current.qty--;
+      if (current.qty === 0) {
+        closedEpisodes.push(current);
+        current = null;
+      }
+    }
+  });
+
+  return { closedEpisodes: closedEpisodes, openEpisode: current, orphanSells: orphanSells };
+}
+
+async function getAllEpisodes() {
+  const byCode = await getAllRawEvents();
+  const result = {}; // code -> { closedEpisodes, openEpisode, orphanSells }
+  for (const code in byCode) {
+    result[code] = buildEpisodes(byCode[code]);
+  }
+  return result;
+}
+
+function episodeStats(entries) {
+  const buys = entries.filter(function (e) { return e.type === "買"; });
+  const sells = entries.filter(function (e) { return e.type === "賣"; });
+  const avgBuy = buys.length ? buys.reduce(function (a, b) { return a + b.price; }, 0) / buys.length : 0;
+  const avgSell = sells.length ? sells.reduce(function (a, b) { return a + b.price; }, 0) / sells.length : 0;
+  return { buys, sells, avgBuy, avgSell };
+}
+
+function fmtEpisodeLine(e, i) {
+  const timePart = e.time ? " " + e.time : "";
+  const priceRange = e.suggestedPrice ? "建議價 " + e.suggestedPrice + "　" : "";
+  let line = "  " + (i + 1) + ". [" + e.type + "] " + e.date + timePart + "　" + priceRange + "當下 " + e.price.toFixed(2) + (e.group ? "【" + e.group + "】" : "");
+  if (e.note) line += "\n     備註：" + e.note;
+  return line;
+}
+
+async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
+  const allEpisodes = allEpisodesInput || (await getAllEpisodes());
+  const codesWithOpen = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
+  if (!codesWithOpen.length) return "目前無持倉";
+
+  let totalPnl = 0, totalCost = 0;
+  const blocks = codesWithOpen.map(function (code) {
+    const ep = allEpisodes[code].openEpisode;
+    const stats = episodeStats(ep.entries);
+    const qty = ep.qty;
+    const p = livePrices && livePrices[code];
+    const curPrice = p ? p.price : null;
+    const costTotal = stats.avgBuy * qty * 1000;
+    const pnlTotal = curPrice !== null ? (curPrice - stats.avgBuy) * qty * 1000 : null;
+    if (pnlTotal !== null) totalPnl += pnlTotal;
+    totalCost += costTotal;
+    const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
+    let block = code + " " + name + "　持股：" + qty + " 張　均價：" + stats.avgBuy.toFixed(2) + "　成本：" + Math.round(costTotal).toLocaleString() + " 元\n";
+    ep.entries.forEach(function (e, i) { block += fmtEpisodeLine(e, i) + "\n"; });
+    if (curPrice !== null) {
+      const pct = (curPrice - stats.avgBuy) / stats.avgBuy * 100;
+      block += "  現價：" + curPrice + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct).toFixed(2) + "%\n";
+      block += "  未實現損益：" + (pnlTotal >= 0 ? "+" : "") + Math.round(pnlTotal).toLocaleString() + " 元";
+    } else {
+      block += "  現價：查詢中...";
+    }
+    if (allEpisodes[code].closedEpisodes.length > 0) {
+      block += "\n  （此檔另有 " + allEpisodes[code].closedEpisodes.length + " 輪已結算，見「結算」）";
+    }
+    return block.trim();
+  });
+
+  const d = "═".repeat(20);
+  return blocks.join("\n\n") + "\n\n" + d +
+    "\n總持股：" + codesWithOpen.length + " 支" +
+    "\n總成本：" + Math.round(totalCost).toLocaleString() + " 元" +
+    "\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
+}
+
+async function getSettledSummaryByEpisode(allEpisodesInput) {
+  const allEpisodes = allEpisodesInput || (await getAllEpisodes());
+  const profitBlocks = [], lossBlocks = [];
+  let totalPnl = 0;
+  let orphanCount = 0;
+
+  for (const code in allEpisodes) {
+    const info = allEpisodes[code];
+    orphanCount += info.orphanSells.length;
+    info.closedEpisodes.forEach(function (ep, idx) {
+      const stats = episodeStats(ep.entries);
+      const qty = stats.buys.length;
+      const pnl = (stats.avgSell - stats.avgBuy) * qty * 1000;
+      const pct = stats.avgBuy ? (stats.avgSell - stats.avgBuy) / stats.avgBuy * 100 : 0;
+      totalPnl += pnl;
+      const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
+      const roundLabel = info.closedEpisodes.length > 1 ? "　第" + (idx + 1) + "輪" : "";
+      let block = code + " " + name + roundLabel + "　共 " + qty + " 張　" + (pnl >= 0 ? "獲利" : "虧損") + "\n";
+      ep.entries.forEach(function (e, i) { block += fmtEpisodeLine(e, i) + "\n"; });
+      block += "  均買：" + stats.avgBuy.toFixed(2) + "　均賣：" + stats.avgSell.toFixed(2) + "\n";
+      block += "  已實現損益：" + (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + " 元 (" + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
+      if (pnl >= 0) profitBlocks.push({ block, pnl }); else lossBlocks.push({ block, pnl });
+    });
+  }
+  profitBlocks.sort(function (a, b) { return b.pnl - a.pnl; });
+  lossBlocks.sort(function (a, b) { return a.pnl - b.pnl; });
+
+  const d = "═".repeat(20);
+  const profitText = profitBlocks.length
+    ? "💰 獲利（" + profitBlocks.length + " 輪）\n" + d + "\n" + profitBlocks.map(function (x) { return x.block; }).join("\n\n")
+    : "尚無獲利紀錄";
+  const lossText = lossBlocks.length
+    ? "📉 虧損（" + lossBlocks.length + " 輪）\n" + d + "\n" + lossBlocks.map(function (x) { return x.block; }).join("\n\n")
+    : "尚無虧損紀錄";
+  let footer = "\n總已實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
+  if (orphanCount > 0) footer += "\n⚠ 有 " + orphanCount + " 筆賣出訊號查無對應持股（可能是資料異常），未計入結算，可用「明細 代號」查看";
+  return { profitText, lossText, totalPnl, footer };
+}
+
 module.exports = {
   loadNameCache, getName, setName,
   addBuy, addSell, findExisting, cancelEntry, adjustPrice,
   getBackup, getRemaining, getHeldCodes,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,
+  getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode,
 };

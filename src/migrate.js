@@ -194,6 +194,8 @@ async function migrate() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sells_code ON sells(code);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_daily_signals_date ON daily_signals(signal_date);`);
     await client.query(`ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS group_tag TEXT;`);
+    await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
+    await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
 
     const { rows } = await client.query("SELECT COUNT(*)::int AS n FROM buys");
     if (rows[0].n === 0) {

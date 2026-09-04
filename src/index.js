@@ -90,9 +90,9 @@ async function runHistoricalBackfill() {
       if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
       } else {
-        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
       }
       inserted++;
     } catch (err) {
@@ -292,8 +292,8 @@ async function handleEvent(event) {
       return;
     }
     const finalGroup = confirmExtract.group || pending.group;
-    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
-    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup);
+    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
+    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
     await pendingSignals.deletePending(code);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
       "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (finalGroup ? "【" + finalGroup + "】" : "") + "\n" +
@@ -313,8 +313,8 @@ async function handleEvent(event) {
     const failed = [];
     for (const p of all) {
       if (!p.price) { failed.push(p.code); continue; }
-      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
-      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group);
+      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
+      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
       await pendingSignals.deletePending(p.code);
     }
     let msg = "✅ 已記錄 " + (all.length - failed.length) + " 筆";
@@ -426,9 +426,10 @@ async function handleEvent(event) {
   if (text === "持股" || text === "我的持股") {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
     try {
-      const allCodes = await portfolio.getHeldCodes();
-      const livePrices = await fetchMultipleStocks(allCodes);
-      const msg = await portfolio.getHoldingSummary(livePrices);
+      const allEpisodes = await portfolio.getAllEpisodes();
+      const openCodes = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
+      const livePrices = await fetchMultipleStocks(openCodes);
+      const msg = await portfolio.getHoldingSummaryByEpisode(allEpisodes, livePrices);
       await pushLongMessage(sourceId, msg);
     } catch (err) {
       console.error("[持股]", err.message);
@@ -450,7 +451,13 @@ async function handleEvent(event) {
 
   // ── 結算 ──
   if (text === "結算" || text === "已結算") {
-    await replyLongMessage(replyToken, sourceId, await portfolio.getSettledSummary());
+    try {
+      const settled = await portfolio.getSettledSummaryByEpisode();
+      await replyLongMessage(replyToken, sourceId, settled.profitText + "\n\n" + settled.lossText + settled.footer);
+    } catch (err) {
+      console.error("[結算]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢結算時發生錯誤：" + err.message }] });
+    }
     return;
   }
 
