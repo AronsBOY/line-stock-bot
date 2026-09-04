@@ -78,7 +78,7 @@ async function replyLongMessage(replyToken, to, text) {
 }
 
 async function runHistoricalBackfill() {
-  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, failed = 0;
+  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, skippedNoHolding = 0, failed = 0;
   for (const sig of HISTORICAL_SIGNALS) {
     try {
       const dateStr = sig.source_date;
@@ -90,18 +90,25 @@ async function runHistoricalBackfill() {
       if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill");
+        inserted++;
       } else {
-        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price);
+        // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就賣一半，不再每則訊號只插1張
+        const { remaining } = await portfolio.getRemaining(sig.stock_code);
+        if (remaining <= 0) { skippedNoHolding++; await sleep(1100); continue; }
+        const qtyToSell = sig.qty === "half" ? Math.max(1, Math.floor(remaining / 2)) : remaining;
+        for (let i = 0; i < qtyToSell; i++) {
+          await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill");
+        }
+        inserted += qtyToSell;
       }
-      inserted++;
     } catch (err) {
       failed++;
       console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
     }
     await sleep(1100); // 節流，配合Fugle免費版 60次/分鐘 的限制
   }
-  return { inserted, skippedDup, skippedNoPrice, failed, total: HISTORICAL_SIGNALS.length };
+  return { inserted, skippedDup, skippedNoPrice, skippedNoHolding, failed, total: HISTORICAL_SIGNALS.length };
 }
 
 async function runSimulation(capital) {
@@ -292,8 +299,8 @@ async function handleEvent(event) {
       return;
     }
     const finalGroup = confirmExtract.group || pending.group;
-    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
-    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice);
+    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice, "signal");
+    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice, "signal");
     await pendingSignals.deletePending(code);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
       "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (finalGroup ? "【" + finalGroup + "】" : "") + "\n" +
@@ -313,8 +320,8 @@ async function handleEvent(event) {
     const failed = [];
     for (const p of all) {
       if (!p.price) { failed.push(p.code); continue; }
-      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
-      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice);
+      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice, "signal");
+      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice, "signal");
       await pendingSignals.deletePending(p.code);
     }
     let msg = "✅ 已記錄 " + (all.length - failed.length) + " 筆";
@@ -461,6 +468,24 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 清除回補資料（僅限老師本人或管理員，安全刪除，不會動到手動輸入的紀錄）──
+  if (text === "清除回補資料") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    try {
+      const result = await portfolio.deleteBySource("backfill");
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
+        "✅ 已清除「回補歷史」寫入的資料\n刪除買入：" + result.buys + " 筆\n刪除賣出：" + result.sells + " 筆\n\n（你手動打指令記錄的資料不受影響）\n可以重新輸入「回補歷史」再跑一次"
+      }] });
+    } catch (err) {
+      console.error("[清除回補資料]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "清除時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
+
   // ── 回補歷史（僅限老師本人或管理員觸發，背景執行，完成後主動通知）──
   if (text === "回補歷史") {
     if (!isAdmin(senderName)) {
@@ -470,10 +495,11 @@ async function handleEvent(event) {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始回補歷史訊號，共 " + HISTORICAL_SIGNALS.length + " 筆，預計需要幾分鐘，完成後會通知你" }] });
     runHistoricalBackfill().then(async function (result) {
       const msg = "✅ 歷史回補完成\n" + "─".repeat(20) + "\n" +
-        "總筆數：" + result.total + "\n" +
-        "成功寫入：" + result.inserted + "\n" +
+        "總訊號數：" + result.total + "\n" +
+        "成功寫入：" + result.inserted + " 筆（含賣出訊號依全部/一半展開的張數）\n" +
         "跳過（同代號同日期已有紀錄）：" + result.skippedDup + "\n" +
         "跳過（查無收盤價/方向不明）：" + result.skippedNoPrice + "\n" +
+        "跳過（賣出訊號但當時無持股）：" + result.skippedNoHolding + "\n" +
         "失敗：" + result.failed + "\n\n" +
         "輸入「持股」或「結算」查看最新結果";
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
@@ -529,7 +555,7 @@ async function handleEvent(event) {
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
       "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
-      "【管理】\n回補歷史（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
+      "【管理】\n清除回補資料（僅限老師本人）\n回補歷史（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }

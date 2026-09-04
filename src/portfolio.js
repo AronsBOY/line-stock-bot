@@ -28,20 +28,26 @@ async function setName(code, name) {
   return "已設定 " + code + " 名稱為「" + name + "」（已永久保存）";
 }
 
-async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice) {
+async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null]
+    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual"]
   );
 }
 
-async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice) {
+async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null]
+    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual"]
   );
+}
+
+async function deleteBySource(source) {
+  const b = await pool.query(`DELETE FROM buys WHERE source=$1`, [source]);
+  const s = await pool.query(`DELETE FROM sells WHERE source=$1`, [source]);
+  return { buys: b.rowCount, sells: s.rowCount };
 }
 
 async function findExisting(code, date) {
@@ -449,7 +455,7 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
 
 module.exports = {
   loadNameCache, getName, setName,
-  addBuy, addSell, findExisting, cancelEntry, adjustPrice,
+  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource,
   getBackup, getRemaining, getHeldCodes,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,

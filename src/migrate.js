@@ -200,6 +200,9 @@ async function migrate() {
     await client.query(`ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS group_tag TEXT;`);
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
+    // 標記這筆紀錄是怎麼進來的：manual=手動指令、backfill=歷史回補、signal=即時訊號確認
+    await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
+    await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
 
     const { rows } = await client.query("SELECT COUNT(*)::int AS n FROM buys");
     if (rows[0].n === 0) {
