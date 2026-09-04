@@ -30,6 +30,12 @@ function isTeacher(name) {
   if (!t) return false;
   return name.includes(t) || t.includes(name);
 }
+function isAdmin(name) {
+  // 這三個管理指令（回補歷史/模擬帳戶）除了老師本人，也允許 ADMIN_NAMES 環境變數裡列出的人
+  if (isTeacher(name)) return true;
+  const admins = (process.env.ADMIN_NAMES || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+  return admins.some(function (a) { return name.includes(a) || a.includes(name); });
+}
 function extractGroupTag(text) {
   // 從指令句尾抓「基本組」「進階組」，抓到就從文字裡拿掉，不影響原本指令解析
   const m = text.match(/\s*(基本組|進階組)\s*$/);
@@ -413,10 +419,10 @@ async function handleEvent(event) {
     return;
   }
 
-  // ── 回補歷史（僅限老師本人觸發，背景執行，完成後主動通知）──
+  // ── 回補歷史（僅限老師本人或管理員觸發，背景執行，完成後主動通知）──
   if (text === "回補歷史") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始回補歷史訊號，共 " + HISTORICAL_SIGNALS.length + " 筆，預計需要幾分鐘，完成後會通知你" }] });
@@ -440,8 +446,8 @@ async function handleEvent(event) {
 
   // ── 模擬帳戶（無限資金）──
   if (text === "模擬無限資金") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（無限資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
@@ -457,8 +463,8 @@ async function handleEvent(event) {
 
   // ── 模擬帳戶（1000萬資金上限）──
   if (text === "模擬1000萬") {
-    if (!isTeacher(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用" }] });
       return;
     }
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（1000萬資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
