@@ -28,19 +28,19 @@ async function setName(code, name) {
   return "已設定 " + code + " 名稱為「" + name + "」（已永久保存）";
 }
 
-async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source) {
+async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual"]
+    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null]
   );
 }
 
-async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source) {
+async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual"]
+    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null]
   );
 }
 
@@ -302,11 +302,11 @@ function formatTransactionList(code, name, entries) {
 
 async function getAllRawEvents() {
   const buys = (await pool.query(
-    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, id
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, id
      FROM buys ORDER BY trade_date, signal_time NULLS FIRST, id`
   )).rows;
   const sells = (await pool.query(
-    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, id
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, id
      FROM sells ORDER BY trade_date, signal_time NULLS FIRST, id`
   )).rows;
   const byCode = {};
@@ -314,13 +314,13 @@ async function getAllRawEvents() {
   buys.forEach(function (b) {
     ensure(b.code).buys.push({
       type: "買", date: b.trade_date, time: b.signal_time, price: parseFloat(b.price),
-      note: b.note, group: b.group_tag, suggestedPrice: b.suggested_price, id: b.id,
+      note: b.note, group: b.group_tag, suggestedPrice: b.suggested_price, priceType: b.price_type, id: b.id,
     });
   });
   sells.forEach(function (s) {
     ensure(s.code).sells.push({
       type: "賣", date: s.trade_date, time: s.signal_time, price: parseFloat(s.price),
-      note: s.note, group: s.group_tag, suggestedPrice: s.suggested_price, id: s.id,
+      note: s.note, group: s.group_tag, suggestedPrice: s.suggested_price, priceType: s.price_type, id: s.id,
     });
   });
   return byCode;
@@ -378,17 +378,11 @@ function episodeStats(entries) {
   return { buys, sells, avgBuy, avgSell };
 }
 
-function fmtEpisodeLine(e, i) {
-  const timePart = e.time ? " " + e.time : "";
-  const priceRange = e.suggestedPrice ? "建議價 " + e.suggestedPrice + "　" : "";
-  let line = "  " + (i + 1) + ". [" + e.type + "] " + e.date + timePart + "　" + priceRange + "當下 " + e.price.toFixed(2) + (e.group ? "【" + e.group + "】" : "");
-  if (e.note) line += "\n     備註：" + e.note;
-  return line;
-}
-
-// 已結算專用：只留日期跟價位，不帶老師原文備註，數據精簡
-function fmtEpisodeLineSimple(e, i) {
-  return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "　" + e.price.toFixed(2);
+// 統一極簡格式：不帶時間、不帶備註、不帶組別，只留日期/指令區間價位/實際價位（標明時價或收盤價）
+function fmtEntryMinimal(e, i) {
+  const priceRange = e.suggestedPrice || "-";
+  const priceType = e.priceType || "收盤價"; // 舊資料沒有這欄位時，預設當作收盤價
+  return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "【指令】" + priceRange + "【" + priceType + "】" + e.price.toFixed(2);
 }
 
 async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
@@ -408,8 +402,8 @@ async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
     if (pnlTotal !== null) totalPnl += pnlTotal;
     totalCost += costTotal;
     const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
-    let block = code + " " + name + "　持股：" + qty + " 張　均價：" + stats.avgBuy.toFixed(2) + "　成本：" + Math.round(costTotal).toLocaleString() + " 元\n";
-    ep.entries.forEach(function (e, i) { block += fmtEpisodeLine(e, i) + "\n"; });
+    let block = code + " " + name + "　買入次數：" + stats.buys.length + "　均價：" + stats.avgBuy.toFixed(2) + "　持股：" + qty + " 張　成本：" + Math.round(costTotal).toLocaleString() + " 元\n";
+    ep.entries.forEach(function (e, i) { block += fmtEntryMinimal(e, i) + "\n"; });
     if (curPrice !== null) {
       const pct = (curPrice - stats.avgBuy) / stats.avgBuy * 100;
       block += "  現價：" + curPrice + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct).toFixed(2) + "%\n";
@@ -447,8 +441,8 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
       totalPnl += pnl;
       const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
       const roundLabel = info.closedEpisodes.length > 1 ? "　第" + (idx + 1) + "輪" : "";
-      let block = code + " " + name + roundLabel + "\n";
-      ep.entries.forEach(function (e, i) { block += fmtEpisodeLineSimple(e, i) + "\n"; });
+      let block = code + " " + name + roundLabel + "　買入次數：" + qty + "\n";
+      ep.entries.forEach(function (e, i) { block += fmtEntryMinimal(e, i) + "\n"; });
       block += "  均買：" + stats.avgBuy.toFixed(2) + "　－　均賣：" + stats.avgSell.toFixed(2) +
         "　＝　" + (pct >= 0 ? "贏 " : "輸 ") + Math.abs(pct).toFixed(2) + "%，" +
         (pnl >= 0 ? "贏 +" : "輸 ") + Math.round(pnl).toLocaleString() + " 元";

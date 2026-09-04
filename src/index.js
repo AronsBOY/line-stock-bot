@@ -86,11 +86,11 @@ async function runHistoricalBackfill() {
       const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
       if (sameSide.length > 0) { skippedDup++; await sleep(1100); continue; }
       if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
-      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, null);
+      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, sig.source_time);
       if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill");
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType);
         inserted++;
       } else {
         // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就賣一半，不再每則訊號只插1張
@@ -98,7 +98,7 @@ async function runHistoricalBackfill() {
         if (remaining <= 0) { skippedNoHolding++; await sleep(1100); continue; }
         const qtyToSell = sig.qty === "half" ? Math.max(1, Math.floor(remaining / 2)) : remaining;
         for (let i = 0; i < qtyToSell; i++) {
-          await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill");
+          await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType);
         }
         inserted += qtyToSell;
       }

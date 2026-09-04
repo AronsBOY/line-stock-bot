@@ -203,6 +203,9 @@ async function migrate() {
     // 標記這筆紀錄是怎麼進來的：manual=手動指令、backfill=歷史回補、signal=即時訊號確認
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
+    // 標記這筆的實際價位是「時價」（精確時間點成交價）還是「收盤價」（找不到精確時間退而求其次用當日收盤）
+    await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS price_type TEXT;`);
+    await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS price_type TEXT;`);
 
     const { rows } = await client.query("SELECT COUNT(*)::int AS n FROM buys");
     if (rows[0].n === 0) {

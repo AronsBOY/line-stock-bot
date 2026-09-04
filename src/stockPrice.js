@@ -63,6 +63,7 @@ async function fetchHistoricalClose(stockCode, dateStr) {
       isUp: change >= 0,
       timestamp: dateStr,
       isHistorical: true,
+      priceType: "收盤價",
     };
   } catch (err) {
     return null;
@@ -106,6 +107,7 @@ async function fetchHistoricalIntraday(stockCode, dateStr, timeStr) {
       isUp: change >= 0,
       timestamp: dateStr + " " + actualTime,
       isHistorical: true,
+      priceType: "時價",
     };
   } catch (err) {
     return null;
@@ -128,11 +130,17 @@ async function fetchStockPrice(stockCode, dateStr, timeStr) {
 async function fetchMultipleStocks(codes) {
   const unique = [];
   codes.forEach(function (c) { if (!unique.includes(c)) unique.push(c); });
-  const results = await Promise.allSettled(unique.map(function (c) { return fetchStockPrice(c); }));
+  // 節流：分批平行處理，每批最多10檔、批次間隔1秒，避免瞬間超過Fugle免費版60次/分鐘限制
+  const BATCH_SIZE = 10;
   const output = {};
-  unique.forEach(function (code, i) {
-    output[code] = results[i].status === "fulfilled" ? results[i].value : null;
-  });
+  for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+    const batch = unique.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(function (c) { return fetchStockPrice(c); }));
+    batch.forEach(function (code, j) {
+      output[code] = results[j].status === "fulfilled" ? results[j].value : null;
+    });
+    if (i + BATCH_SIZE < unique.length) await new Promise(function (r) { setTimeout(r, 1100); });
+  }
   return output;
 }
 
