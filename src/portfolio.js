@@ -50,6 +50,23 @@ async function deleteBySource(source) {
   return { buys: b.rowCount, sells: s.rowCount };
 }
 
+// 專門清「source欄位還沒存在以前」就寫進去、被誤標成manual的舊回補資料
+// 判斷依據：這種資料一定有signal_time（真正手動打指令的紀錄，這欄永遠是空的）
+async function deleteLegacyBackfill() {
+  const b = await pool.query(`DELETE FROM buys WHERE source='backfill' OR (source='manual' AND signal_time IS NOT NULL)`);
+  const s = await pool.query(`DELETE FROM sells WHERE source='backfill' OR (source='manual' AND signal_time IS NOT NULL)`);
+  return { buys: b.rowCount, sells: s.rowCount };
+}
+
+async function deleteLegacyBackfill() {
+  // 抓「有時間戳記+有備註」的資料——這是訊號來源（回補/即時確認）才會有的特徵，
+  // 手動打「買/賣」指令絕對不會附這兩個欄位，用這個判斷比 source 欄位更可靠，
+  // 因為舊版程式碼寫入的資料在新增 source 欄位時，已經被自動貼上跟手動輸入一樣的預設值。
+  const b = await pool.query(`DELETE FROM buys WHERE source='backfill' OR (signal_time IS NOT NULL AND note IS NOT NULL)`);
+  const s = await pool.query(`DELETE FROM sells WHERE source='backfill' OR (signal_time IS NOT NULL AND note IS NOT NULL)`);
+  return { buys: b.rowCount, sells: s.rowCount };
+}
+
 async function findExisting(code, date) {
   // 用來檢查歷史回補時，是否已經有同代號同日期的紀錄（避免跟舊資料重複）
   const b = await pool.query(`SELECT id, price FROM buys WHERE code=$1 AND trade_date=$2`, [code, date]);
@@ -455,7 +472,7 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
 
 module.exports = {
   loadNameCache, getName, setName,
-  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource,
+  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill,
   getBackup, getRemaining, getHeldCodes,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,

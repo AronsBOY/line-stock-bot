@@ -475,7 +475,7 @@ async function handleEvent(event) {
       return;
     }
     try {
-      const result = await portfolio.deleteBySource("backfill");
+      const result = await portfolio.deleteLegacyBackfill();
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
         "✅ 已清除「回補歷史」寫入的資料\n刪除買入：" + result.buys + " 筆\n刪除賣出：" + result.sells + " 筆\n\n（你手動打指令記錄的資料不受影響）\n可以重新輸入「回補歷史」再跑一次"
       }] });
