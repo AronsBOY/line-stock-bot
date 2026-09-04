@@ -52,10 +52,10 @@ async function runHistoricalBackfill() {
       const dateStr = sig.source_date;
       const existing = await portfolio.findExisting(sig.stock_code, dateStr);
       const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
-      if (sameSide.length > 0) { skippedDup++; await sleep(400); continue; }
+      if (sameSide.length > 0) { skippedDup++; await sleep(1100); continue; }
       if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
       const p = await fetchHistoricalPrice(sig.stock_code, dateStr, null);
-      if (!p) { skippedNoPrice++; await sleep(400); continue; }
+      if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
         await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
@@ -67,7 +67,7 @@ async function runHistoricalBackfill() {
       failed++;
       console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
     }
-    await sleep(400); // 節流，避免對股價來源打太快
+    await sleep(1100); // 節流，配合Fugle免費版 60次/分鐘 的限制
   }
   return { inserted, skippedDup, skippedNoPrice, failed, total: HISTORICAL_SIGNALS.length };
 }
@@ -89,7 +89,7 @@ async function runSimulation(capital) {
       const p = await fetchHistoricalPrice(sig.stock_code, sig.source_date, null);
       price = p ? p.price : null;
       priceCache[cacheKey] = price;
-      await sleep(400);
+      await sleep(1100);
     }
     if (price === null) { skippedNoPrice.push(sig.stock_code + " " + sig.source_date); continue; }
 
@@ -120,7 +120,7 @@ async function runSimulation(capital) {
     const lots = holdings[code];
     if (lots.length === 0) continue;
     const p = await fetchStockPrice(code, null, null);
-    await sleep(400);
+    await sleep(1100);
     const curPrice = p ? p.price : null;
     const avgCost = lots.reduce(function (a, b) { return a + b.price; }, 0) / lots.length;
     if (curPrice !== null) {
