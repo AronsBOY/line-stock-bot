@@ -363,10 +363,15 @@ function fmtEpisodeLine(e, i) {
   return line;
 }
 
+// 已結算專用：只留日期跟價位，不帶老師原文備註，數據精簡
+function fmtEpisodeLineSimple(e, i) {
+  return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "　" + e.price.toFixed(2);
+}
+
 async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
   const allEpisodes = allEpisodesInput || (await getAllEpisodes());
   const codesWithOpen = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
-  if (!codesWithOpen.length) return "目前無持倉";
+  if (!codesWithOpen.length) return "【持股庫存】\n目前無持倉";
 
   let totalPnl = 0, totalCost = 0;
   const blocks = codesWithOpen.map(function (code) {
@@ -396,7 +401,7 @@ async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
   });
 
   const d = "═".repeat(20);
-  return blocks.join("\n\n") + "\n\n" + d +
+  return "【持股庫存】\n" + d + "\n" + blocks.join("\n\n") + "\n\n" + d +
     "\n總持股：" + codesWithOpen.length + " 支" +
     "\n總成本：" + Math.round(totalCost).toLocaleString() + " 元" +
     "\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
@@ -419,10 +424,9 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
       totalPnl += pnl;
       const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
       const roundLabel = info.closedEpisodes.length > 1 ? "　第" + (idx + 1) + "輪" : "";
-      let block = code + " " + name + roundLabel + "　共 " + qty + " 張　" + (pnl >= 0 ? "獲利" : "虧損") + "\n";
-      ep.entries.forEach(function (e, i) { block += fmtEpisodeLine(e, i) + "\n"; });
-      block += "  均買：" + stats.avgBuy.toFixed(2) + "　均賣：" + stats.avgSell.toFixed(2) + "\n";
-      block += "  已實現損益：" + (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + " 元 (" + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
+      let block = code + " " + name + roundLabel + "\n";
+      ep.entries.forEach(function (e, i) { block += fmtEpisodeLineSimple(e, i) + "\n"; });
+      block += "  " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
       if (pnl >= 0) profitBlocks.push({ block, pnl }); else lossBlocks.push({ block, pnl });
     });
   }
@@ -431,11 +435,11 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
 
   const d = "═".repeat(20);
   const profitText = profitBlocks.length
-    ? "💰 獲利（" + profitBlocks.length + " 輪）\n" + d + "\n" + profitBlocks.map(function (x) { return x.block; }).join("\n\n")
-    : "尚無獲利紀錄";
+    ? "【已結算】贏（" + profitBlocks.length + " 輪）\n" + d + "\n" + profitBlocks.map(function (x) { return x.block; }).join("\n\n")
+    : "【已結算】贏\n尚無獲利紀錄";
   const lossText = lossBlocks.length
-    ? "📉 虧損（" + lossBlocks.length + " 輪）\n" + d + "\n" + lossBlocks.map(function (x) { return x.block; }).join("\n\n")
-    : "尚無虧損紀錄";
+    ? "【已結算】輸（" + lossBlocks.length + " 輪）\n" + d + "\n" + lossBlocks.map(function (x) { return x.block; }).join("\n\n")
+    : "【已結算】輸\n尚無虧損紀錄";
   let footer = "\n總已實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
   if (orphanCount > 0) footer += "\n⚠ 有 " + orphanCount + " 筆賣出訊號查無對應持股（可能是資料異常），未計入結算，可用「明細 代號」查看";
   return { profitText, lossText, totalPnl, footer };
