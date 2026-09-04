@@ -426,7 +426,9 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
       const roundLabel = info.closedEpisodes.length > 1 ? "　第" + (idx + 1) + "輪" : "";
       let block = code + " " + name + roundLabel + "\n";
       ep.entries.forEach(function (e, i) { block += fmtEpisodeLineSimple(e, i) + "\n"; });
-      block += "  " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
+      block += "  均買：" + stats.avgBuy.toFixed(2) + "　－　均賣：" + stats.avgSell.toFixed(2) +
+        "　＝　" + (pct >= 0 ? "贏 " : "輸 ") + Math.abs(pct).toFixed(2) + "%，" +
+        (pnl >= 0 ? "贏 +" : "輸 ") + Math.round(pnl).toLocaleString() + " 元";
       if (pnl >= 0) profitBlocks.push({ block, pnl }); else lossBlocks.push({ block, pnl });
     });
   }
