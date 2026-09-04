@@ -8,6 +8,7 @@ const { setupScheduler, addSignal } = require("./scheduler");
 const portfolio = require("./portfolio");
 const pendingSignals = require("./pendingSignals");
 const { migrate } = require("./migrate");
+const HISTORICAL_SIGNALS = require("./historicalSignals");
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -34,6 +35,135 @@ function extractGroupTag(text) {
   const m = text.match(/\s*(基本組|進階組)\s*$/);
   if (m) return { text: text.slice(0, m.index).trim(), group: m[1] };
   return { text: text, group: null };
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+async function runHistoricalBackfill() {
+  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, failed = 0;
+  for (const sig of HISTORICAL_SIGNALS) {
+    try {
+      const dateStr = sig.source_date;
+      const existing = await portfolio.findExisting(sig.stock_code, dateStr);
+      const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
+      if (sameSide.length > 0) { skippedDup++; await sleep(400); continue; }
+      if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
+      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, null);
+      if (!p) { skippedNoPrice++; await sleep(400); continue; }
+      const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
+      if (sig.action === "買入") {
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+      } else {
+        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group);
+      }
+      inserted++;
+    } catch (err) {
+      failed++;
+      console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
+    }
+    await sleep(400); // 節流，避免對股價來源打太快
+  }
+  return { inserted, skippedDup, skippedNoPrice, failed, total: HISTORICAL_SIGNALS.length };
+}
+
+async function runSimulation(capital) {
+  // capital: null = 無限資金；否則為起始現金（元）
+  const holdings = {}; // code -> [{price, date}]
+  let cash = capital;
+  let realizedPnl = 0;
+  const skippedBuys = [];
+  const skippedNoPrice = [];
+  const priceCache = {};
+
+  for (const sig of HISTORICAL_SIGNALS) {
+    if (sig.action !== "買入" && sig.action !== "賣出") continue;
+    const cacheKey = sig.stock_code + "-" + sig.source_date;
+    let price = priceCache[cacheKey];
+    if (price === undefined) {
+      const p = await fetchHistoricalPrice(sig.stock_code, sig.source_date, null);
+      price = p ? p.price : null;
+      priceCache[cacheKey] = price;
+      await sleep(400);
+    }
+    if (price === null) { skippedNoPrice.push(sig.stock_code + " " + sig.source_date); continue; }
+
+    if (sig.action === "買入") {
+      const cost = price * 1000;
+      if (cash !== null && cash < cost) {
+        skippedBuys.push({ code: sig.stock_code, date: sig.source_date, price });
+        continue;
+      }
+      if (!holdings[sig.stock_code]) holdings[sig.stock_code] = [];
+      holdings[sig.stock_code].push({ price, date: sig.source_date });
+      if (cash !== null) cash -= cost;
+    } else {
+      const held = holdings[sig.stock_code] || [];
+      if (held.length === 0) continue;
+      const qtyToSell = sig.qty === "half" ? Math.max(1, Math.floor(held.length / 2)) : held.length;
+      for (let i = 0; i < qtyToSell; i++) {
+        const lot = held.shift();
+        realizedPnl += (price - lot.price) * 1000;
+        if (cash !== null) cash += price * 1000;
+      }
+    }
+  }
+
+  let unrealizedPnl = 0, remainingValue = 0;
+  const remainingPositions = [];
+  for (const code in holdings) {
+    const lots = holdings[code];
+    if (lots.length === 0) continue;
+    const p = await fetchStockPrice(code, null, null);
+    await sleep(400);
+    const curPrice = p ? p.price : null;
+    const avgCost = lots.reduce(function (a, b) { return a + b.price; }, 0) / lots.length;
+    if (curPrice !== null) {
+      const value = curPrice * lots.length * 1000;
+      const cost = avgCost * lots.length * 1000;
+      unrealizedPnl += (value - cost);
+      remainingValue += value;
+      remainingPositions.push({ code, qty: lots.length, avgCost, curPrice, pnl: value - cost });
+    } else {
+      remainingPositions.push({ code, qty: lots.length, avgCost, curPrice: null, pnl: null });
+    }
+  }
+  remainingPositions.sort(function (a, b) { return (b.pnl || 0) - (a.pnl || 0); });
+
+  return {
+    capital, cash, realizedPnl, unrealizedPnl, remainingValue,
+    totalPnl: realizedPnl + unrealizedPnl,
+    remainingPositions, skippedBuys, skippedNoPrice,
+  };
+}
+
+function formatSimulationReport(title, result) {
+  let msg = "📊 " + title + "\n" + "─".repeat(20) + "\n";
+  if (result.capital !== null) {
+    msg += "起始資金：" + result.capital.toLocaleString() + " 元\n";
+    msg += "剩餘現金：" + Math.round(result.cash).toLocaleString() + " 元\n";
+  }
+  msg += "已實現損益：" + (result.realizedPnl >= 0 ? "+" : "") + Math.round(result.realizedPnl).toLocaleString() + " 元\n";
+  msg += "未實現損益：" + (result.unrealizedPnl >= 0 ? "+" : "") + Math.round(result.unrealizedPnl).toLocaleString() + " 元\n";
+  msg += "總損益：" + (result.totalPnl >= 0 ? "+" : "") + Math.round(result.totalPnl).toLocaleString() + " 元\n";
+  msg += "\n目前持有 " + result.remainingPositions.length + " 檔未平倉";
+  if (result.remainingPositions.length > 0) {
+    msg += "（前10檔，依損益排序）：\n";
+    result.remainingPositions.slice(0, 10).forEach(function (p) {
+      const name = portfolio.getName(p.code) || p.code;
+      if (p.curPrice !== null) {
+        msg += p.code + " " + name + " x" + p.qty + "張 均價" + p.avgCost.toFixed(1) + " 現價" + p.curPrice + " " + (p.pnl >= 0 ? "+" : "") + Math.round(p.pnl).toLocaleString() + "\n";
+      } else {
+        msg += p.code + " " + name + " x" + p.qty + "張（現價查無資料）\n";
+      }
+    });
+  }
+  if (result.capital !== null && result.skippedBuys.length > 0) {
+    msg += "\n⚠ 因資金不足跳過的買入：" + result.skippedBuys.length + " 筆";
+  }
+  if (result.skippedNoPrice.length > 0) {
+    msg += "\n⚠ 查無股價跳過：" + result.skippedNoPrice.length + " 筆";
+  }
+  return msg.trim();
 }
 
 async function handleEvent(event) {
@@ -283,6 +413,65 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 回補歷史（僅限老師本人觸發，背景執行，完成後主動通知）──
+  if (text === "回補歷史") {
+    if (!isTeacher(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+      return;
+    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始回補歷史訊號，共 " + HISTORICAL_SIGNALS.length + " 筆，預計需要幾分鐘，完成後會通知你" }] });
+    runHistoricalBackfill().then(async function (result) {
+      const msg = "✅ 歷史回補完成\n" + "─".repeat(20) + "\n" +
+        "總筆數：" + result.total + "\n" +
+        "成功寫入：" + result.inserted + "\n" +
+        "跳過（同代號同日期已有紀錄）：" + result.skippedDup + "\n" +
+        "跳過（查無收盤價/方向不明）：" + result.skippedNoPrice + "\n" +
+        "失敗：" + result.failed + "\n\n" +
+        "輸入「持股」或「結算」查看最新結果";
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
+    }).catch(async function (err) {
+      console.error("[回補歷史]", err.message);
+      try {
+        await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回補過程發生錯誤：" + err.message }] });
+      } catch (e) {}
+    });
+    return;
+  }
+
+  // ── 模擬帳戶（無限資金）──
+  if (text === "模擬無限資金") {
+    if (!isTeacher(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+      return;
+    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（無限資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
+    runSimulation(null).then(async function (result) {
+      const msg = formatSimulationReport("模擬帳戶績效（無限資金，完全依指令進出）", result);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
+    }).catch(async function (err) {
+      console.error("[模擬無限資金]", err.message);
+      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "模擬過程發生錯誤：" + err.message }] }); } catch (e) {}
+    });
+    return;
+  }
+
+  // ── 模擬帳戶（1000萬資金上限）──
+  if (text === "模擬1000萬") {
+    if (!isTeacher(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人使用" }] });
+      return;
+    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（1000萬資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
+    runSimulation(10000000).then(async function (result) {
+      const msg = formatSimulationReport("模擬帳戶績效（1000萬資金，資金不足跳過買入）", result);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
+    }).catch(async function (err) {
+      console.error("[模擬1000萬]", err.message);
+      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "模擬過程發生錯誤：" + err.message }] }); } catch (e) {}
+    });
+    return;
+  }
+
   // ── 指令說明 ──
   if (text === "指令" || text === "help") {
     const msg =
@@ -291,7 +480,8 @@ async function handleEvent(event) {
       "【買賣記錄】\n買 3533 2026-04-23 10:04\n買 3533 2026-04-23\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
-      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份";
+      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
+      "【管理】\n回補歷史（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
