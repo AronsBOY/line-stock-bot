@@ -90,17 +90,15 @@ async function runHistoricalBackfill() {
       if (!p) { skippedNoPrice++; await sleep(1100); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType);
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, 1);
         inserted++;
       } else {
-        // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就賣一半，不再每則訊號只插1張
+        // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就精準賣一半（不四捨五入，例如3張賣一半=1.5張，一筆記錄完成）
         const { remaining } = await portfolio.getRemaining(sig.stock_code);
         if (remaining <= 0) { skippedNoHolding++; await sleep(1100); continue; }
-        const qtyToSell = sig.qty === "half" ? Math.max(1, Math.floor(remaining / 2)) : remaining;
-        for (let i = 0; i < qtyToSell; i++) {
-          await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType);
-        }
-        inserted += qtyToSell;
+        const qtyToSell = sig.qty === "half" ? remaining / 2 : remaining;
+        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, qtyToSell);
+        inserted += 1;
       }
     } catch (err) {
       failed++;
@@ -381,9 +379,9 @@ async function handleEvent(event) {
     const { remaining } = await portfolio.getRemaining(code);
     if (remaining <= 0) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: code + " 目前無持股可賣" }] }); return; }
     let qty = remaining;
-    if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
-    else if (!isNaN(parseInt(qtyStr))) qty = Math.min(parseInt(qtyStr), remaining);
-    for (let i = 0; i < qty; i++) await portfolio.addSell(code, code, sDate, price, null, null, sellExtract.group);
+    if (qtyStr === "一半") qty = remaining / 2; // 精準一半，例如3張賣一半=1.5張，不四捨五入
+    else if (!isNaN(parseInt(qtyStr))) qty = Math.min(parseFloat(qtyStr), remaining);
+    await portfolio.addSell(code, code, sDate, price, null, null, sellExtract.group, null, "manual", null, qty);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出\n" + code + " " + (portfolio.getName(code) || "") + (sellExtract.group ? "【" + sellExtract.group + "】" : "") + " ×" + qty + "張 @" + price + "\n剩餘：" + (remaining - qty) + " 張" }] });
     return;
   }
@@ -405,10 +403,10 @@ async function handleEvent(event) {
     const qtyStr = fullSellMatch[4] ? fullSellMatch[4].trim() : "1";
     const { remaining } = await portfolio.getRemaining(code);
     let qty = 1;
-    if (qtyStr === "一半") qty = Math.max(1, Math.floor(remaining / 2));
+    if (qtyStr === "一半") qty = remaining / 2;
     else if (qtyStr === "全部") qty = remaining;
-    else qty = Math.min(parseInt(qtyStr) || 1, remaining);
-    for (let i = 0; i < qty; i++) await portfolio.addSell(code, code, fsDate, fsPrice, null, null, fullSellExtract.group);
+    else qty = Math.min(parseFloat(qtyStr) || 1, remaining);
+    await portfolio.addSell(code, code, fsDate, fsPrice, null, null, fullSellExtract.group, null, "manual", null, qty);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄賣出 " + code + " ×" + qty + "張 @" + fsPrice }] });
     return;
   }

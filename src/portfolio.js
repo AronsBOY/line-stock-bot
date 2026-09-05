@@ -28,19 +28,19 @@ async function setName(code, name) {
   return "已設定 " + code + " 名稱為「" + name + "」（已永久保存）";
 }
 
-async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType) {
+async function addBuy(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType, qty) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null]
+    `INSERT INTO buys (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type, qty) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null, qty != null ? qty : 1]
   );
 }
 
-async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType) {
+async function addSell(code, name, date, price, signalTime, note, groupTag, suggestedPrice, source, priceType, qty) {
   const n = getName(code) || name || code;
   await pool.query(
-    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null]
+    `INSERT INTO sells (code, name, trade_date, price, signal_time, note, group_tag, suggested_price, source, price_type, qty) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [code, n, date, parseFloat(price), signalTime || null, note || null, groupTag || null, suggestedPrice || null, source || "manual", priceType || null, qty != null ? qty : 1]
   );
 }
 
@@ -119,8 +119,8 @@ async function getBackup() {
 }
 
 async function getRemaining(code) {
-  const holdRes = await pool.query(`SELECT COUNT(*)::int AS n FROM buys WHERE code=$1`, [code]);
-  const soldRes = await pool.query(`SELECT COUNT(*)::int AS n FROM sells WHERE code=$1`, [code]);
+  const holdRes = await pool.query(`SELECT COALESCE(SUM(qty),0)::float AS n FROM buys WHERE code=$1`, [code]);
+  const soldRes = await pool.query(`SELECT COALESCE(SUM(qty),0)::float AS n FROM sells WHERE code=$1`, [code]);
   const holdCount = holdRes.rows[0].n;
   const soldCount = soldRes.rows[0].n;
   return { holdCount: holdCount, soldCount: soldCount, remaining: holdCount - soldCount };
@@ -264,19 +264,19 @@ async function getSettledSummarySplit() {
 
 async function getTransactionList(code, groupFilter) {
   const buys = (await pool.query(
-    `SELECT to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag FROM buys WHERE code=$1 ORDER BY trade_date, id`,
+    `SELECT to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, qty FROM buys WHERE code=$1 ORDER BY trade_date, id`,
     [code]
   )).rows;
   const sells = (await pool.query(
-    `SELECT to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag FROM sells WHERE code=$1 ORDER BY trade_date, id`,
+    `SELECT to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, qty FROM sells WHERE code=$1 ORDER BY trade_date, id`,
     [code]
   )).rows;
   let all = [];
   buys.forEach(function (b) {
-    all.push({ type: "買", date: b.trade_date, price: parseFloat(b.price), time: b.signal_time, note: b.note, group: b.group_tag });
+    all.push({ type: "買", date: b.trade_date, price: parseFloat(b.price), time: b.signal_time, note: b.note, group: b.group_tag, qty: parseFloat(b.qty) });
   });
   sells.forEach(function (s) {
-    all.push({ type: "賣", date: s.trade_date, price: parseFloat(s.price), time: s.signal_time, note: s.note, group: s.group_tag });
+    all.push({ type: "賣", date: s.trade_date, price: parseFloat(s.price), time: s.signal_time, note: s.note, group: s.group_tag, qty: parseFloat(s.qty) });
   });
   if (groupFilter) all = all.filter(function (e) { return e.group === groupFilter; });
   all.sort(function (a, b) { return (a.date + (a.time||"")).localeCompare(b.date + (b.time||"")); });
@@ -289,7 +289,7 @@ function formatTransactionList(code, name, entries) {
   entries.forEach(function (e, i) {
     const groupLabel = e.group ? "【" + e.group + "】" : "";
     const timePart = e.time ? " " + e.time : "";
-    txt += (i + 1) + ". [" + e.type + "] " + e.date + timePart + " " + e.price.toFixed(2) + groupLabel + "\n";
+    txt += (i + 1) + ". [" + e.type + "] " + e.date + timePart + " " + e.price.toFixed(2) + "【數量】" + round2(e.qty) + "張" + groupLabel + "\n";
     if (e.note) txt += "   備註：" + e.note + "\n";
   });
   return txt.trim();
@@ -302,11 +302,11 @@ function formatTransactionList(code, name, entries) {
 
 async function getAllRawEvents() {
   const buys = (await pool.query(
-    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, id
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, id
      FROM buys ORDER BY trade_date, signal_time NULLS FIRST, id`
   )).rows;
   const sells = (await pool.query(
-    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, id
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, id
      FROM sells ORDER BY trade_date, signal_time NULLS FIRST, id`
   )).rows;
   const byCode = {};
@@ -314,13 +314,15 @@ async function getAllRawEvents() {
   buys.forEach(function (b) {
     ensure(b.code).buys.push({
       type: "買", date: b.trade_date, time: b.signal_time, price: parseFloat(b.price),
-      note: b.note, group: b.group_tag, suggestedPrice: b.suggested_price, priceType: b.price_type, id: b.id,
+      note: b.note, group: b.group_tag, suggestedPrice: b.suggested_price, priceType: b.price_type,
+      qty: parseFloat(b.qty), id: b.id,
     });
   });
   sells.forEach(function (s) {
     ensure(s.code).sells.push({
       type: "賣", date: s.trade_date, time: s.signal_time, price: parseFloat(s.price),
-      note: s.note, group: s.group_tag, suggestedPrice: s.suggested_price, priceType: s.price_type, id: s.id,
+      note: s.note, group: s.group_tag, suggestedPrice: s.suggested_price, priceType: s.price_type,
+      qty: parseFloat(s.qty), id: s.id,
     });
   });
   return byCode;
@@ -338,20 +340,22 @@ function buildEpisodes(rawEvents) {
   const closedEpisodes = [];
   const orphanSells = [];
   let current = null;
+  const EPS = 0.0001; // 浮點數誤差容許值，避免1.5-1.5算出來是0.00000001而永遠關不了輪
 
   events.forEach(function (e) {
     if (e.type === "買") {
       if (!current) current = { entries: [], qty: 0 };
       current.entries.push(e);
-      current.qty++;
+      current.qty += e.qty;
     } else {
-      if (!current || current.qty <= 0) {
+      if (!current || current.qty <= EPS) {
         orphanSells.push(e); // 沒有對應持股的賣出訊號，資料異常，不算進任何一輪
         return;
       }
       current.entries.push(e);
-      current.qty--;
-      if (current.qty === 0) {
+      current.qty -= e.qty;
+      if (current.qty <= EPS) {
+        current.qty = Math.max(0, current.qty); // 清掉浮點誤差留下的極小負數
         closedEpisodes.push(current);
         current = null;
       }
@@ -370,19 +374,33 @@ async function getAllEpisodes() {
   return result;
 }
 
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function weightedAvg(entries) {
+  const totalQty = entries.reduce(function (a, e) { return a + e.qty; }, 0);
+  if (totalQty <= 0) return 0;
+  const totalCost = entries.reduce(function (a, e) { return a + e.price * e.qty; }, 0);
+  return totalCost / totalQty;
+}
+
 function episodeStats(entries) {
   const buys = entries.filter(function (e) { return e.type === "買"; });
   const sells = entries.filter(function (e) { return e.type === "賣"; });
-  const avgBuy = buys.length ? buys.reduce(function (a, b) { return a + b.price; }, 0) / buys.length : 0;
-  const avgSell = sells.length ? sells.reduce(function (a, b) { return a + b.price; }, 0) / sells.length : 0;
-  return { buys, sells, avgBuy, avgSell };
+  const buyQty = buys.reduce(function (a, e) { return a + e.qty; }, 0);
+  const sellQty = sells.reduce(function (a, e) { return a + e.qty; }, 0);
+  const avgBuy = weightedAvg(buys);
+  const avgSell = weightedAvg(sells);
+  return { buys, sells, avgBuy, avgSell, buyQty, sellQty };
 }
 
-// 統一極簡格式：不帶時間、不帶備註、不帶組別，只留日期/指令區間價位/實際價位（標明時價或收盤價）
+// 統一極簡格式：不帶時間、不帶備註、不帶組別，只留日期/指令區間價位/實際價位（標明時價或收盤價）/實際數量
 function fmtEntryMinimal(e, i) {
   const priceRange = e.suggestedPrice || "-";
   const priceType = e.priceType || "收盤價"; // 舊資料沒有這欄位時，預設當作收盤價
-  return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "【指令】" + priceRange + "【" + priceType + "】" + e.price.toFixed(2);
+  const qtyStr = round2(e.qty) + "張";
+  return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "【指令】" + priceRange + "【" + priceType + "】" + e.price.toFixed(2) + "【數量】" + qtyStr;
 }
 
 function todayTW() {
@@ -398,7 +416,7 @@ async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
   const blocks = codesWithOpen.map(function (code) {
     const ep = allEpisodes[code].openEpisode;
     const stats = episodeStats(ep.entries);
-    const qty = ep.qty;
+    const qty = round2(ep.qty);
     const p = livePrices && livePrices[code];
     const curPrice = p ? p.price : null;
     const costTotal = stats.avgBuy * qty * 1000;
@@ -439,13 +457,13 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
     orphanCount += info.orphanSells.length;
     info.closedEpisodes.forEach(function (ep, idx) {
       const stats = episodeStats(ep.entries);
-      const qty = stats.buys.length;
+      const qty = round2(stats.buyQty);
       const pnl = (stats.avgSell - stats.avgBuy) * qty * 1000;
       const pct = stats.avgBuy ? (stats.avgSell - stats.avgBuy) / stats.avgBuy * 100 : 0;
       totalPnl += pnl;
       const name = getName(code) || (ep.entries[0] && ep.entries[0].name) || code;
       const roundLabel = info.closedEpisodes.length > 1 ? "　第" + (idx + 1) + "輪" : "";
-      let block = code + " " + name + roundLabel + "　買入次數：" + qty + "\n";
+      let block = code + " " + name + roundLabel + "　數量：" + qty + " 張\n";
       ep.entries.forEach(function (e, i) { block += fmtEntryMinimal(e, i) + "\n"; });
       block += "  均買：" + stats.avgBuy.toFixed(2) + "　－　均賣：" + stats.avgSell.toFixed(2) +
         "　＝　" + (pct >= 0 ? "贏 " : "輸 ") + Math.abs(pct).toFixed(2) + "%，" +
@@ -482,9 +500,7 @@ async function forceAlignHoldings(keepCodes, fetchLivePriceFn) {
       const p = await fetchLivePriceFn(code);
       if (!p) { failed.push(code); continue; }
       const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
-      for (let i = 0; i < ep.qty; i++) {
-        await addSell(code, getName(code) || code, today, p.price, null, "系統校正：使用者確認實際已無持股", null, null, "correction", p.priceType || null);
-      }
+      await addSell(code, getName(code) || code, today, p.price, null, "系統校正：使用者確認實際已無持股", null, null, "correction", p.priceType || null, ep.qty);
       closed.push({ code, qty: ep.qty, price: p.price });
     } catch (err) {
       failed.push(code);

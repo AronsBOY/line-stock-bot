@@ -206,6 +206,9 @@ async function migrate() {
     // 標記這筆的實際價位是「時價」（精確時間點成交價）還是「收盤價」（找不到精確時間退而求其次用當日收盤）
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS price_type TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS price_type TEXT;`);
+    // 每一筆實際的數量（張），預設1張，支援分數（例如3張賣一半=1.5張，不用四捨五入）
+    await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS qty NUMERIC DEFAULT 1;`);
+    await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS qty NUMERIC DEFAULT 1;`);
 
     const { rows } = await client.query("SELECT COUNT(*)::int AS n FROM buys");
     if (rows[0].n === 0) {
