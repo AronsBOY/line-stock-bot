@@ -6,6 +6,21 @@ function fugleHeaders() {
   return { "X-API-KEY": process.env.FUGLE_API_KEY };
 }
 
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// 統一包一層：遇到429（流量限制）就等2秒重試一次，避免短時間內密集操作互相干擾導致直接查詢失敗
+async function fugleGet(url, config) {
+  try {
+    return await axios.get(url, config);
+  } catch (err) {
+    if (err.response && err.response.status === 429) {
+      await sleep(2000);
+      return await axios.get(url, config);
+    }
+    throw err;
+  }
+}
+
 function nowTW() {
   return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 }
@@ -13,7 +28,7 @@ function nowTW() {
 // ── 即時報價 ──
 async function fetchLatestPrice(stockCode) {
   try {
-    const { data } = await axios.get(FUGLE_BASE + "/intraday/quote/" + stockCode, {
+    const { data } = await fugleGet(FUGLE_BASE + "/intraday/quote/" + stockCode, {
       headers: fugleHeaders(), timeout: 8000,
     });
     if (!data || data.closePrice == null) return null;
@@ -41,7 +56,7 @@ async function fetchLatestPrice(stockCode) {
 // ── 歷史收盤價（日Ｋ）──
 async function fetchHistoricalClose(stockCode, dateStr) {
   try {
-    const { data } = await axios.get(FUGLE_BASE + "/historical/candles/" + stockCode, {
+    const { data } = await fugleGet(FUGLE_BASE + "/historical/candles/" + stockCode, {
       headers: fugleHeaders(),
       params: { from: dateStr, to: dateStr, fields: "open,high,low,close,volume,change" },
       timeout: 8000,
@@ -73,7 +88,7 @@ async function fetchHistoricalClose(stockCode, dateStr) {
 // ── 歷史分K（指定時間點）──
 async function fetchHistoricalIntraday(stockCode, dateStr, timeStr) {
   try {
-    const { data } = await axios.get(FUGLE_BASE + "/historical/candles/" + stockCode, {
+    const { data } = await fugleGet(FUGLE_BASE + "/historical/candles/" + stockCode, {
       headers: fugleHeaders(),
       params: { from: dateStr, to: dateStr, timeframe: "1", fields: "open,high,low,close,volume", sort: "asc" },
       timeout: 8000,

@@ -491,16 +491,19 @@ async function forceAlignHoldings(keepCodes, fetchLivePriceFn) {
     if (!ep || ep.qty <= 0) continue;
     try {
       const p = await fetchLivePriceFn(code);
-      if (!p) { failed.push(code); continue; }
+      if (!p) { failed.push(code); await sleep(1100); continue; }
       const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
       await addSell(code, getName(code) || code, today, p.price, null, "系統校正：使用者確認實際已無持股", null, null, "correction", p.priceType || null, ep.qty);
       closed.push({ code, qty: ep.qty, price: p.price });
     } catch (err) {
       failed.push(code);
     }
+    await sleep(1100); // 節流，配合Fugle免費版 60次/分鐘 的限制
   }
   return { closed, failed };
 }
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 module.exports = {
   loadNameCache, getName, setName,
