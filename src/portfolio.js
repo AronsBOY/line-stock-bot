@@ -385,10 +385,14 @@ function fmtEntryMinimal(e, i) {
   return "  " + (i + 1) + ". [" + e.type + "] " + e.date + "【指令】" + priceRange + "【" + priceType + "】" + e.price.toFixed(2);
 }
 
+function todayTW() {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
+}
+
 async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
   const allEpisodes = allEpisodesInput || (await getAllEpisodes());
   const codesWithOpen = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
-  if (!codesWithOpen.length) return "【持股庫存】\n目前無持倉";
+  if (!codesWithOpen.length) return "【持股庫存】（" + todayTW() + "）\n目前無持倉";
 
   let totalPnl = 0, totalCost = 0;
   const blocks = codesWithOpen.map(function (code) {
@@ -418,7 +422,7 @@ async function getHoldingSummaryByEpisode(allEpisodesInput, livePrices) {
   });
 
   const d = "═".repeat(20);
-  return "【持股庫存】\n" + d + "\n" + blocks.join("\n\n") + "\n\n" + d +
+  return "【持股庫存】（" + todayTW() + "）\n" + d + "\n" + blocks.join("\n\n") + "\n\n" + d +
     "\n總持股：" + codesWithOpen.length + " 支" +
     "\n總成本：" + Math.round(totalCost).toLocaleString() + " 元" +
     "\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
