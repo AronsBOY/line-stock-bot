@@ -464,6 +464,31 @@ async function getSettledSummaryByEpisode(allEpisodesInput) {
   return { profitText, lossText, totalPnl, footer };
 }
 
+// 強制對齊持股：只保留指定代號清單，其他有持股的一律用「現在的即時股價」強制賣光結清
+// 這是管理員手動校正用的，不是真實訊號，會清楚標註來源
+async function forceAlignHoldings(keepCodes, fetchLivePriceFn) {
+  const allEpisodes = await getAllEpisodes();
+  const closed = [];
+  const failed = [];
+  for (const code in allEpisodes) {
+    if (keepCodes.includes(code)) continue;
+    const ep = allEpisodes[code].openEpisode;
+    if (!ep || ep.qty <= 0) continue;
+    try {
+      const p = await fetchLivePriceFn(code);
+      if (!p) { failed.push(code); continue; }
+      const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
+      for (let i = 0; i < ep.qty; i++) {
+        await addSell(code, getName(code) || code, today, p.price, null, "系統校正：使用者確認實際已無持股", null, null, "correction", p.priceType || null);
+      }
+      closed.push({ code, qty: ep.qty, price: p.price });
+    } catch (err) {
+      failed.push(code);
+    }
+  }
+  return { closed, failed };
+}
+
 module.exports = {
   loadNameCache, getName, setName,
   addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill,
@@ -471,4 +496,5 @@ module.exports = {
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,
   getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode,
+  forceAlignHoldings,
 };

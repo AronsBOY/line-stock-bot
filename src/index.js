@@ -468,6 +468,29 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 強制對齊持股（僅限老師本人或管理員，直接照給定名單強制結清其他所有持股）──
+  if (text === "強制對齊持股") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    const KEEP_CODES = ["3081","2426","2351","4991","6805","6213","3374","8021","6239","6285"]; // 聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始強制對齊，只保留這10檔：聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁，其他持股會用現在的即時股價強制結清，請稍候..." }] });
+    try {
+      const result = await portfolio.forceAlignHoldings(KEEP_CODES, function(code) { return fetchStockPrice(code, null, null); });
+      let msg = "✅ 強制對齊完成\n" + "─".repeat(20) + "\n";
+      msg += "結清：" + result.closed.length + " 檔\n";
+      result.closed.forEach(function(c) { msg += "  " + c.code + " ×" + c.qty + "張 @" + c.price + "\n"; });
+      if (result.failed.length) msg += "查無股價失敗：" + result.failed.join(", ") + "\n";
+      msg += "\n輸入「持股」查看結果";
+      await pushLongMessage(sourceId, msg);
+    } catch (err) {
+      console.error("[強制對齊持股]", err.message);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "強制對齊時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
+
   // ── 清除回補資料（僅限老師本人或管理員，安全刪除，不會動到手動輸入的紀錄）──
   if (text === "清除回補資料") {
     if (!isAdmin(senderName)) {
@@ -555,7 +578,7 @@ async function handleEvent(event) {
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
       "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
-      "【管理】\n清除回補資料（僅限老師本人）\n回補歷史（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
+      "【管理】\n清除回補資料（僅限老師本人）\n回補歷史（僅限老師本人）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
