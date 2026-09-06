@@ -1,140 +1,181 @@
 const axios = require("axios");
 
-const FUGLE_BASE = "https://api.fugle.tw/marketdata/v1.0/stock";
-
-function fugleHeaders() {
-  return { "X-API-KEY": process.env.FUGLE_API_KEY };
-}
-
-function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-
-// 統一包一層：遇到429（流量限制）就等2秒重試一次，避免短時間內密集操作互相干擾導致直接查詢失敗
-async function fugleGet(url, config) {
+async function tryYahoo(symbol) {
   try {
-    return await axios.get(url, config);
-  } catch (err) {
-    if (err.response && err.response.status === 429) {
-      await sleep(2000);
-      return await axios.get(url, config);
-    }
-    throw err;
-  }
-}
-
-function nowTW() {
-  return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
-}
-
-// ── 即時報價 ──
-async function fetchLatestPrice(stockCode) {
-  try {
-    const { data } = await fugleGet(FUGLE_BASE + "/intraday/quote/" + stockCode, {
-      headers: fugleHeaders(), timeout: 8000,
-    });
-    if (!data || data.closePrice == null) return null;
-    const price = data.closePrice;
-    const change = data.change != null ? data.change : (data.previousClose != null ? price - data.previousClose : 0);
-    const changePct = data.changePercent != null ? data.changePercent : (data.previousClose ? (change / data.previousClose) * 100 : 0);
+    const { data } = await axios.get(
+      "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol,
+      { params: { interval: "1m", range: "1d" }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
+    );
+    const result = data.chart && data.chart.result && data.chart.result[0];
+    if (!result) return null;
+    const meta = result.meta;
+    const price = meta.regularMarketPrice;
+    const prev = meta.previousClose || meta.chartPreviousClose;
+    if (!price || !prev) return null;
+    const change = price - prev;
+    const changePct = (change / prev) * 100;
+    const now = new Date();
+    const twH = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Taipei" })).getHours();
+    const twM = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Taipei" })).getMinutes();
+    const isOpen = twH >= 9 && (twH < 13 || (twH === 13 && twM <= 30));
     return {
-      code: stockCode,
-      price: price,
-      change: change,
-      changePct: changePct,
-      high: data.highPrice != null ? data.highPrice : null,
-      low: data.lowPrice != null ? data.lowPrice : null,
-      longName: data.name || stockCode,
-      marketStatus: data.isClose ? "盤後" : "盤中",
+      code: symbol.replace(".TW", "").replace(".TWO", ""),
+      price: parseFloat(price.toFixed(2)),
+      change: parseFloat(change.toFixed(2)),
+      changePct: parseFloat(changePct.toFixed(2)),
+      high: meta.regularMarketDayHigh ? parseFloat(meta.regularMarketDayHigh.toFixed(2)) : null,
+      low: meta.regularMarketDayLow ? parseFloat(meta.regularMarketDayLow.toFixed(2)) : null,
+      longName: meta.longName || meta.shortName || symbol,
+      marketStatus: isOpen ? "盤中" : "盤後",
       isUp: change >= 0,
-      timestamp: nowTW(),
+      timestamp: new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" }),
       isHistorical: false,
+      priceType: "即時",
     };
   } catch (err) {
     return null;
   }
 }
 
-// ── 歷史收盤價（日Ｋ）──
-async function fetchHistoricalClose(stockCode, dateStr) {
+async function fetchLatestPrice(stockCode) {
+  const tw = await tryYahoo(stockCode + ".TW");
+  if (tw) return tw;
+  const two = await tryYahoo(stockCode + ".TWO");
+  if (two) return two;
+  return null;
+}
+
+async function fetchTWSEClose(stockCode, dateStr) {
   try {
-    const { data } = await fugleGet(FUGLE_BASE + "/historical/candles/" + stockCode, {
-      headers: fugleHeaders(),
-      params: { from: dateStr, to: dateStr, fields: "open,high,low,close,volume,change" },
-      timeout: 8000,
-    });
-    if (!data || !data.data || !data.data.length) return null;
-    const row = data.data[0];
-    const close = row.close;
-    const change = row.change != null ? row.change : 0;
-    const prevClose = close - change;
+    const d = dateStr.replace(/-/g, "");
+    const ym = d.slice(0, 6) + "01";
+    const { data } = await axios.get(
+      "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
+      { params: { date: ym, stockNo: stockCode, response: "json" }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
+    );
+    if (!data || !data.data) return null;
+    const parts = dateStr.split("-");
+    const rocYear = parseInt(parts[0]) - 1911;
+    const target = rocYear + "/" + parts[1] + "/" + parts[2];
+    const row = data.data.find(function (r) { return r[0] === target; });
+    if (!row) return null;
+    const close = parseFloat(row[6].replace(/,/g, ""));
+    const open = parseFloat(row[3].replace(/,/g, ""));
+    const change = close - open;
     return {
-      code: stockCode,
-      price: close,
+      code: stockCode, price: close,
       change: parseFloat(change.toFixed(2)),
-      changePct: prevClose ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0,
-      high: row.high != null ? row.high : null,
-      low: row.low != null ? row.low : null,
-      longName: stockCode,
-      marketStatus: "收盤（Fugle）",
-      isUp: change >= 0,
-      timestamp: dateStr,
-      isHistorical: true,
+      changePct: parseFloat(((change / open) * 100).toFixed(2)),
+      high: parseFloat(row[4].replace(/,/g, "")),
+      low: parseFloat(row[5].replace(/,/g, "")),
+      longName: stockCode, marketStatus: "收盤（TWSE）",
+      isUp: change >= 0, timestamp: dateStr, isHistorical: true,
       priceType: "收盤價",
     };
-  } catch (err) {
-    return null;
-  }
+  } catch (err) { return null; }
 }
 
-// ── 歷史分K（指定時間點）──
-async function fetchHistoricalIntraday(stockCode, dateStr, timeStr) {
+async function fetchTPEXClose(stockCode, dateStr) {
   try {
-    const { data } = await fugleGet(FUGLE_BASE + "/historical/candles/" + stockCode, {
-      headers: fugleHeaders(),
-      params: { from: dateStr, to: dateStr, timeframe: "1", fields: "open,high,low,close,volume", sort: "asc" },
-      timeout: 8000,
-    });
-    if (!data || !data.data || !data.data.length) return null;
-    const rows = data.data;
-    const parts = timeStr.split(":");
-    const targetMinutes = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-    let closest = rows[0], minDiff = Infinity;
-    rows.forEach(function (r) {
-      const d = new Date(r.date);
-      const twH = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Taipei" })).getHours();
-      const twM = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Taipei" })).getMinutes();
-      const diff = Math.abs((twH * 60 + twM) - targetMinutes);
-      if (diff < minDiff) { minDiff = diff; closest = r; }
-    });
-    const d = new Date(closest.date);
-    const actualTime = d.toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false });
-    const dayClose = await fetchHistoricalClose(stockCode, dateStr);
-    const prevClose = dayClose ? dayClose.price - dayClose.change : closest.close;
-    const change = closest.close - prevClose;
+    const parts = dateStr.split("-");
+    const rocYear = parseInt(parts[0]) - 1911;
+    const d = rocYear + "/" + parts[1] + "/" + parts[2];
+    const { data } = await axios.get(
+      "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
+      { params: { l: "zh-tw", d: d, stkno: stockCode }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
+    );
+    if (!data || !data.aaData || !data.aaData.length) return null;
+    const row = data.aaData[0];
+    const close = parseFloat(row[6].replace(/,/g, ""));
+    const open = parseFloat(row[3].replace(/,/g, ""));
+    const change = close - open;
     return {
-      code: stockCode,
-      price: closest.close,
+      code: stockCode, price: close,
       change: parseFloat(change.toFixed(2)),
-      changePct: prevClose ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0,
-      high: closest.high != null ? closest.high : null,
-      low: closest.low != null ? closest.low : null,
-      longName: stockCode,
-      marketStatus: actualTime + " 歷史",
-      isUp: change >= 0,
-      timestamp: dateStr + " " + actualTime,
-      isHistorical: true,
-      priceType: "時價",
+      changePct: parseFloat(((change / open) * 100).toFixed(2)),
+      high: parseFloat(row[4].replace(/,/g, "")),
+      low: parseFloat(row[5].replace(/,/g, "")),
+      longName: stockCode, marketStatus: "收盤（TPEX）",
+      isUp: change >= 0, timestamp: dateStr, isHistorical: true,
+      priceType: "收盤價",
     };
-  } catch (err) {
-    return null;
+  } catch (err) { return null; }
+}
+
+function toTWTimestamp(dateStr, timeStr) {
+  const dt = timeStr
+    ? new Date(dateStr + "T" + timeStr + ":00+08:00")
+    : new Date(dateStr + "T13:30:00+08:00");
+  return Math.floor(dt.getTime() / 1000);
+}
+
+async function fetchYahooIntraday(stockCode, dateStr, timeStr) {
+  for (const suffix of [".TW", ".TWO"]) {
+    try {
+      const dayStart = Math.floor(new Date(dateStr + "T09:00:00+08:00").getTime() / 1000);
+      const dayEnd = Math.floor(new Date(dateStr + "T14:00:00+08:00").getTime() / 1000);
+      const { data } = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/" + stockCode + suffix,
+        { params: { interval: "1m", period1: dayStart, period2: dayEnd }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 10000 }
+      );
+      const result = data.chart && data.chart.result && data.chart.result[0];
+      if (!result) continue;
+      const timestamps = result.timestamp || [];
+      const closes = result.indicators.quote[0].close || [];
+      if (!timestamps.length) continue;
+      if (!timeStr) {
+        const meta = result.meta;
+        const price = meta.regularMarketPrice || meta.chartPreviousClose;
+        const prev = meta.previousClose || meta.chartPreviousClose;
+        const change = price - prev;
+        return {
+          code: stockCode, price: parseFloat(price.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          changePct: parseFloat(((change/prev)*100).toFixed(2)),
+          longName: meta.longName || meta.shortName || stockCode,
+          marketStatus: "收盤（Yahoo）", isUp: change >= 0,
+          timestamp: dateStr, isHistorical: true,
+          priceType: "收盤價",
+        };
+      }
+      const target = toTWTimestamp(dateStr, timeStr);
+      let closest = 0, minDiff = Infinity;
+      timestamps.forEach(function (ts, i) {
+        const diff = Math.abs(ts - target);
+        if (diff < minDiff && closes[i] != null) { minDiff = diff; closest = i; }
+      });
+      const price = closes[closest];
+      if (!price) continue;
+      const prev = result.meta.previousClose || result.meta.chartPreviousClose;
+      const change = price - prev;
+      const actualTs = new Date(timestamps[closest] * 1000);
+      const actualTime = actualTs.toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false });
+      return {
+        code: stockCode, price: parseFloat(price.toFixed(2)),
+        change: parseFloat(change.toFixed(2)),
+        changePct: parseFloat(((change/prev)*100).toFixed(2)),
+        high: result.indicators.quote[0].high[closest] ? parseFloat(result.indicators.quote[0].high[closest].toFixed(2)) : null,
+        low: result.indicators.quote[0].low[closest] ? parseFloat(result.indicators.quote[0].low[closest].toFixed(2)) : null,
+        longName: result.meta.longName || result.meta.shortName || stockCode,
+        marketStatus: actualTime + " 歷史", isUp: change >= 0,
+        timestamp: dateStr + " " + actualTime, isHistorical: true,
+        priceType: "時價",
+      };
+    } catch (err) { continue; }
   }
+  return null;
 }
 
 async function fetchHistoricalPrice(stockCode, dateStr, timeStr) {
   if (timeStr) {
-    const intraday = await fetchHistoricalIntraday(stockCode, dateStr, timeStr);
-    if (intraday) return intraday;
+    const yahoo = await fetchYahooIntraday(stockCode, dateStr, timeStr);
+    if (yahoo) return yahoo;
   }
-  return await fetchHistoricalClose(stockCode, dateStr);
+  const twse = await fetchTWSEClose(stockCode, dateStr);
+  if (twse) return twse;
+  const tpex = await fetchTPEXClose(stockCode, dateStr);
+  if (tpex) return tpex;
+  return await fetchYahooIntraday(stockCode, dateStr, null);
 }
 
 async function fetchStockPrice(stockCode, dateStr, timeStr) {
@@ -145,7 +186,7 @@ async function fetchStockPrice(stockCode, dateStr, timeStr) {
 async function fetchMultipleStocks(codes) {
   const unique = [];
   codes.forEach(function (c) { if (!unique.includes(c)) unique.push(c); });
-  // 節流：分批平行處理，每批最多10檔、批次間隔1秒，避免瞬間超過Fugle免費版60次/分鐘限制
+  // 節流：分批平行處理，每批最多10檔、批次間隔1秒，避免瞬間對Yahoo/TWSE打太密集被暫時封鎖
   const BATCH_SIZE = 10;
   const output = {};
   for (let i = 0; i < unique.length; i += BATCH_SIZE) {
@@ -154,7 +195,7 @@ async function fetchMultipleStocks(codes) {
     batch.forEach(function (code, j) {
       output[code] = results[j].status === "fulfilled" ? results[j].value : null;
     });
-    if (i + BATCH_SIZE < unique.length) await new Promise(function (r) { setTimeout(r, 1100); });
+    if (i + BATCH_SIZE < unique.length) await new Promise(function (r) { setTimeout(r, 1000); });
   }
   return output;
 }
