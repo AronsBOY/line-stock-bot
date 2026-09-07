@@ -1,8 +1,24 @@
 const axios = require("axios");
 
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// 遇到429（流量限制）就重試，間隔遞增（3秒→8秒），最多重試2次
+async function safeGet(url, config) {
+  const delays = [3000, 8000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await axios.get(url, config);
+    } catch (err) {
+      const is429 = err.response && err.response.status === 429;
+      if (!is429 || attempt === delays.length) throw err;
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
 async function tryYahoo(symbol) {
   try {
-    const { data } = await axios.get(
+    const { data } = await safeGet(
       "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol,
       { params: { interval: "1m", range: "1d" }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
     );
@@ -49,7 +65,7 @@ async function fetchTWSEClose(stockCode, dateStr) {
   try {
     const d = dateStr.replace(/-/g, "");
     const ym = d.slice(0, 6) + "01";
-    const { data } = await axios.get(
+    const { data } = await safeGet(
       "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
       { params: { date: ym, stockNo: stockCode, response: "json" }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
     );
@@ -80,7 +96,7 @@ async function fetchTPEXClose(stockCode, dateStr) {
     const parts = dateStr.split("-");
     const rocYear = parseInt(parts[0]) - 1911;
     const d = rocYear + "/" + parts[1] + "/" + parts[2];
-    const { data } = await axios.get(
+    const { data } = await safeGet(
       "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
       { params: { l: "zh-tw", d: d, stkno: stockCode }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
     );
@@ -114,7 +130,7 @@ async function fetchYahooIntraday(stockCode, dateStr, timeStr) {
     try {
       const dayStart = Math.floor(new Date(dateStr + "T09:00:00+08:00").getTime() / 1000);
       const dayEnd = Math.floor(new Date(dateStr + "T14:00:00+08:00").getTime() / 1000);
-      const { data } = await axios.get(
+      const { data } = await safeGet(
         "https://query1.finance.yahoo.com/v8/finance/chart/" + stockCode + suffix,
         { params: { interval: "1m", period1: dayStart, period2: dayEnd }, headers: { "User-Agent": "Mozilla/5.0" }, timeout: 10000 }
       );
@@ -186,8 +202,8 @@ async function fetchStockPrice(stockCode, dateStr, timeStr) {
 async function fetchMultipleStocks(codes) {
   const unique = [];
   codes.forEach(function (c) { if (!unique.includes(c)) unique.push(c); });
-  // 節流：分批平行處理，每批最多10檔、批次間隔1秒，避免瞬間對Yahoo/TWSE打太密集被暫時封鎖
-  const BATCH_SIZE = 10;
+  // 節流：分批平行處理，每批最多4檔、批次間隔1.2秒，避免瞬間對Yahoo/TWSE打太密集被暫時封鎖
+  const BATCH_SIZE = 4;
   const output = {};
   for (let i = 0; i < unique.length; i += BATCH_SIZE) {
     const batch = unique.slice(i, i + BATCH_SIZE);
@@ -195,7 +211,7 @@ async function fetchMultipleStocks(codes) {
     batch.forEach(function (code, j) {
       output[code] = results[j].status === "fulfilled" ? results[j].value : null;
     });
-    if (i + BATCH_SIZE < unique.length) await new Promise(function (r) { setTimeout(r, 1000); });
+    if (i + BATCH_SIZE < unique.length) await new Promise(function (r) { setTimeout(r, 1200); });
   }
   return output;
 }
