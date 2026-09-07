@@ -505,9 +505,21 @@ async function forceAlignHoldings(keepCodes, fetchLivePriceFn) {
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+async function deleteLegacyBackfillForCodes(codes) {
+  const b = await pool.query(
+    `DELETE FROM buys WHERE code = ANY($1) AND (source IN ('backfill','correction') OR (signal_time IS NOT NULL AND note IS NOT NULL))`,
+    [codes]
+  );
+  const s = await pool.query(
+    `DELETE FROM sells WHERE code = ANY($1) AND (source IN ('backfill','correction') OR (signal_time IS NOT NULL AND note IS NOT NULL))`,
+    [codes]
+  );
+  return { buys: b.rowCount, sells: s.rowCount };
+}
+
 module.exports = {
   loadNameCache, getName, setName,
-  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill,
+  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill, deleteLegacyBackfillForCodes,
   getBackup, getRemaining, getHeldCodes,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,

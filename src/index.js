@@ -84,10 +84,10 @@ async function runHistoricalBackfill() {
       const dateStr = sig.source_date;
       const existing = await portfolio.findExisting(sig.stock_code, dateStr);
       const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
-      if (sameSide.length > 0) { skippedDup++; await sleep(1100); continue; }
+      if (sameSide.length > 0) { skippedDup++; await sleep(1800); continue; }
       if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
       const p = await fetchHistoricalPrice(sig.stock_code, dateStr, sig.source_time);
-      if (!p) { skippedNoPrice++; await sleep(1100); continue; }
+      if (!p) { skippedNoPrice++; await sleep(1800); continue; }
       const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
       if (sig.action === "買入") {
         await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, 1);
@@ -95,7 +95,7 @@ async function runHistoricalBackfill() {
       } else {
         // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就精準賣一半（不四捨五入，例如3張賣一半=1.5張，一筆記錄完成）
         const { remaining } = await portfolio.getRemaining(sig.stock_code);
-        if (remaining <= 0) { skippedNoHolding++; await sleep(1100); continue; }
+        if (remaining <= 0) { skippedNoHolding++; await sleep(1800); continue; }
         const qtyToSell = sig.qty === "half" ? remaining / 2 : remaining;
         await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, qtyToSell);
         inserted += 1;
@@ -104,7 +104,7 @@ async function runHistoricalBackfill() {
       failed++;
       console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
     }
-    await sleep(1100); // 節流，配合Fugle免費版 60次/分鐘 的限制
+    await sleep(1800); // 節流，避免對Yahoo/TWSE/TPEX打太密集觸發429
   }
   return { inserted, skippedDup, skippedNoPrice, skippedNoHolding, failed, total: HISTORICAL_SIGNALS.length };
 }
@@ -126,7 +126,7 @@ async function runSimulation(capital) {
       const p = await fetchHistoricalPrice(sig.stock_code, sig.source_date, null);
       price = p ? p.price : null;
       priceCache[cacheKey] = price;
-      await sleep(1100);
+      await sleep(1800);
     }
     if (price === null) { skippedNoPrice.push(sig.stock_code + " " + sig.source_date); continue; }
 
@@ -157,7 +157,7 @@ async function runSimulation(capital) {
     const lots = holdings[code];
     if (lots.length === 0) continue;
     const p = await fetchStockPrice(code, null, null);
-    await sleep(1100);
+    await sleep(1800);
     const curPrice = p ? p.price : null;
     const avgCost = lots.reduce(function (a, b) { return a + b.price; }, 0) / lots.length;
     if (curPrice !== null) {
@@ -207,6 +207,38 @@ function formatSimulationReport(title, result) {
     msg += "\n⚠ 查無股價跳過：" + result.skippedNoPrice.length + " 筆";
   }
   return msg.trim();
+}
+
+async function runTargetedBackfill(codes) {
+  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, skippedNoHolding = 0, failed = 0;
+  const targetSignals = HISTORICAL_SIGNALS.filter(function (s) { return codes.includes(s.stock_code); });
+  for (const sig of targetSignals) {
+    try {
+      const dateStr = sig.source_date;
+      const existing = await portfolio.findExisting(sig.stock_code, dateStr);
+      const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
+      if (sameSide.length > 0) { skippedDup++; await sleep(1800); continue; }
+      if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
+      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, sig.source_time);
+      if (!p) { skippedNoPrice++; await sleep(1800); continue; }
+      const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
+      if (sig.action === "買入") {
+        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, 1);
+        inserted += 1;
+      } else {
+        const { remaining } = await portfolio.getRemaining(sig.stock_code);
+        if (remaining <= 0) { skippedNoHolding++; await sleep(1800); continue; }
+        const qtyToSell = sig.qty === "half" ? remaining / 2 : remaining;
+        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, qtyToSell);
+        inserted += 1;
+      }
+    } catch (err) {
+      failed++;
+      console.error("[回補持股]", sig.stock_code, sig.source_date, err.message);
+    }
+    await sleep(1800);
+  }
+  return { inserted, skippedDup, skippedNoPrice, skippedNoHolding, failed, total: targetSignals.length };
 }
 
 async function handleEvent(event) {
@@ -507,6 +539,33 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 回補持股（僅限老師本人或管理員，只針對指定的10檔，快很多，不用碰其他270幾則訊號）──
+  if (text === "回補持股") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    const KEEP_CODES = ["3081","2426","2351","4991","6805","6213","3374","8021","6239","6285"];
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "先清掉這10檔既有的舊回補資料，再重新針對這10檔補齊訊號，預計1-2分鐘，完成後會通知你" }] });
+    try {
+      await portfolio.deleteLegacyBackfillForCodes(KEEP_CODES);
+      const result = await runTargetedBackfill(KEEP_CODES);
+      const msg = "✅ 持股回補完成\n" + "─".repeat(20) + "\n" +
+        "這10檔相關訊號數：" + result.total + "\n" +
+        "成功寫入：" + result.inserted + "\n" +
+        "跳過（同代號同日期已有紀錄）：" + result.skippedDup + "\n" +
+        "跳過（查無收盤價/方向不明）：" + result.skippedNoPrice + "\n" +
+        "跳過（賣出但當時無持股）：" + result.skippedNoHolding + "\n" +
+        "失敗：" + result.failed + "\n\n" +
+        "輸入「持股」查看結果";
+      await pushLongMessage(sourceId, msg);
+    } catch (err) {
+      console.error("[回補持股]", err.message);
+      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回補持股時發生錯誤：" + err.message }] }); } catch (e) {}
+    }
+    return;
+  }
+
   // ── 回補歷史（僅限老師本人或管理員觸發，背景執行，完成後主動通知）──
   if (text === "回補歷史") {
     if (!isAdmin(senderName)) {
@@ -576,7 +635,7 @@ async function handleEvent(event) {
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
       "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
-      "【管理】\n清除回補資料（僅限老師本人）\n回補歷史（僅限老師本人）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
+      "【管理】\n清除回補資料（僅限老師本人）\n回補持股（僅限老師本人，只回補指定10檔，較快）\n回補歷史（僅限老師本人，全部276則）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
