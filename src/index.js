@@ -465,7 +465,13 @@ async function handleEvent(event) {
     try {
       const allEpisodes = await portfolio.getAllEpisodes();
       const openCodes = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
-      const livePrices = await fetchMultipleStocks(openCodes);
+      let livePrices = {};
+      try {
+        livePrices = await fetchMultipleStocks(openCodes);
+      } catch (priceErr) {
+        console.error("[持股] 查即時股價失敗，改顯示無現價版本：", priceErr.message);
+        livePrices = {}; // 查不到就都當作null，底下的格式化本來就支援現價缺漏時顯示「查詢中...」
+      }
       const msg = await portfolio.getHoldingSummaryByEpisode(allEpisodes, livePrices);
       await pushLongMessage(sourceId, msg);
     } catch (err) {
