@@ -14,7 +14,7 @@ async function parseSingleMessage(sender, time, text) {
   if (!mightHaveSignal(text)) return [];
   try {
     const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 1500,
       system: `你是台股訊號解析專家。從老師的訊息中精準提取股票買賣指令。
 嚴格規則：
