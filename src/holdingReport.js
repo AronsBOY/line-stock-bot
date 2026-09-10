@@ -49,8 +49,9 @@ function formatEntry(e, index) {
     "【價位】" + range + "【" + priceType + "】" + Number(e.price).toFixed(2);
 }
 
-async function buildHoldingReport(portfolio, codes) {
-  const allEpisodes = await portfolio.getAllEpisodes(codes);
+async function buildHoldingReport(portfolio) {
+  // 持股庫存必須列出所有尚未出清的股票，不能只靠固定清單或最近 N 天交易。
+  const allEpisodes = await portfolio.getAllEpisodes();
   const openCodes = Object.keys(allEpisodes)
     .filter(function (code) {
       return allEpisodes[code].openEpisode && allEpisodes[code].openEpisode.qty > 0.0001;
@@ -74,7 +75,7 @@ async function buildHoldingReport(portfolio, codes) {
 
   let totalCost = 0;
   let totalPnl = 0;
-  let hasAnyLivePrice = false;
+  let pricedCount = 0;
   const blocks = [];
 
   openCodes.forEach(function (code) {
@@ -103,7 +104,7 @@ async function buildHoldingReport(portfolio, codes) {
       const pct = (curPrice - avg) / avg * 100;
       const pnl = (curPrice - avg) * qtyLots * 1000;
       totalPnl += pnl;
-      hasAnyLivePrice = true;
+      pricedCount++;
       block += "　現價：" + curPrice + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct).toFixed(2) + "%\n\n";
       block += "　未實現損益：" + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + " 元";
     } else {
@@ -118,8 +119,10 @@ async function buildHoldingReport(portfolio, codes) {
     "\n\n總持股：" + openCodes.length + " 支" +
     "\n\n總成本：" + formatMoney(totalCost) + " 元";
 
-  if (hasAnyLivePrice) {
+  if (pricedCount === openCodes.length) {
     footer += "\n\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) + " 元";
+  } else if (pricedCount > 0) {
+    footer += "\n\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) + " 元（僅計入已取得現價的 " + pricedCount + " 支）";
   } else {
     footer += "\n\n總未實現損益：暫無法計算";
   }
