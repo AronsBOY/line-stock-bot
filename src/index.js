@@ -24,6 +24,23 @@ const app = express();
 app.use("/webhook", line.middleware(lineConfig));
 app.get("/", function(req, res) { res.json({ status: "running" }); });
 
+// 資料庫匯出用的簡易保護端點：不透過 LINE 推送（LINE推播有自己的頻率/額度限制，
+// 大JSON用pushMessage分批送很容易撞429），改直接開一個帶token驗證的HTTP端點，
+// 讓 Claude 對話視窗能用這個連結直接讀取，不受 LINE 訊息限制影響。
+app.get("/export/trades", async function(req, res) {
+  const token = process.env.EXPORT_TOKEN;
+  if (!token || req.query.token !== token) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const json = await portfolio.exportAllTradesJSON();
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.send(json);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 function isTimeFormat(str) { return /^\d{1,2}:\d{2}$/.test(str); }
 function isPriceFormat(str) { return /^[\d.]+$/.test(str); }
 function isTeacher(name) {
@@ -319,21 +336,21 @@ async function handleEvent(event) {
   }
 
   // ── 打包資料庫（僅限老師本人或管理員）──
-  // 把 buys/sells 全部原始資料匯出成 JSON，用途：結算/歷史分析改成請 Claude 在對話視窗裡算，
-  // 這裡先把資料複製貼給 Claude 保存/分析即可，LINE Bot 本身不再跑這類重運算。
+  // 改成回傳一個HTTP匯出連結，不透過LINE推送大JSON——pushMessage分批送大量文字很容易撞LINE自己的429/額度限制
+  // （今天「打包資料庫」卡住不動就是這個原因，不是報價API的問題）。連結貼給 Claude 就能直接讀取。
   if (text === "打包資料庫") {
     if (!isAdmin(senderName)) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "打包中，請稍候..." }] });
-    try {
-      const json = await portfolio.exportAllTradesJSON();
-      await pushLongMessage(sourceId, "📦 資料庫匯出（JSON，複製整段貼給 Claude）\n" + "─".repeat(20) + "\n" + json);
-    } catch (err) {
-      console.error("[打包資料庫]", err.message);
-      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "打包時發生錯誤：" + err.message }] }); } catch (e) {}
+    const token = process.env.EXPORT_TOKEN;
+    if (!token) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "尚未設定 EXPORT_TOKEN，請先在 Railway 環境變數加上 EXPORT_TOKEN 再試一次" }] });
+      return;
     }
+    const base = process.env.BASE_URL || "https://web-production-cec15.up.railway.app";
+    const url = base + "/export/trades?token=" + token;
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "📦 資料庫匯出連結(請勿外流，含存取權杖)：\n" + url + "\n\n把這個連結貼給 Claude，它可以直接讀取全部買賣紀錄。" }] });
     return;
   }
 
