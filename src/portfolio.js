@@ -136,6 +136,65 @@ async function getHeldCodes() {
   return rows.map(function (r) { return r.code; });
 }
 
+// ── 輕量「持股」用 ──
+// 只查「目前庫存」：代號/名稱/張數/均價/成本，純DB加總運算，完全不打外部報價API、不算歷史損益，
+// 也不用像 getAllEpisodes 那樣把整批交易在記憶體裡重建 episode，運算量最小。
+// codes 用來bound查詢範圍（搭配 WATCHLIST_CODES + getRecentActiveCodes 一起用）。
+async function getSimpleInventory(codes) {
+  const buys = (await pool.query(`SELECT code, name, price, qty FROM buys WHERE code = ANY($1)`, [codes])).rows;
+  const sells = (await pool.query(`SELECT code, qty FROM sells WHERE code = ANY($1)`, [codes])).rows;
+  const byCode = {};
+  buys.forEach(function (b) {
+    if (!byCode[b.code]) byCode[b.code] = { code: b.code, name: b.name, buyQty: 0, buyCost: 0, sellQty: 0 };
+    const q = parseFloat(b.qty) || 1;
+    byCode[b.code].buyQty += q;
+    byCode[b.code].buyCost += q * parseFloat(b.price);
+    if (!byCode[b.code].name && b.name) byCode[b.code].name = b.name;
+  });
+  sells.forEach(function (s) {
+    if (!byCode[s.code]) byCode[s.code] = { code: s.code, name: null, buyQty: 0, buyCost: 0, sellQty: 0 };
+    byCode[s.code].sellQty += parseFloat(s.qty) || 1;
+  });
+  const result = [];
+  for (const code in byCode) {
+    const g = byCode[code];
+    const remaining = g.buyQty - g.sellQty;
+    if (remaining <= 0.0001) continue; // 已出清的不列入庫存
+    const avg = g.buyQty > 0 ? g.buyCost / g.buyQty : 0;
+    result.push({ code: code, name: getName(code) || g.name, qty: remaining, avgCost: avg, totalCost: avg * remaining });
+  }
+  result.sort(function (a, b) { return a.code < b.code ? -1 : 1; });
+  return result;
+}
+
+function formatSimpleInventory(list) {
+  if (!list.length) return "📦 目前無庫存持股";
+  let txt = "📦 庫存持股\n" + "─".repeat(20) + "\n";
+  let totalCost = 0;
+  list.forEach(function (g) {
+    txt += g.code + " " + (g.name || "") + "　" + round2(g.qty) + " 張\n";
+    txt += "  均價：" + g.avgCost.toFixed(2) + "　成本：" + Math.round(g.totalCost).toLocaleString() + " 元\n";
+    totalCost += g.totalCost;
+  });
+  txt += "─".repeat(20) + "\n總成本：" + Math.round(totalCost).toLocaleString() + " 元";
+  return txt;
+}
+
+// ── 打包資料庫：把 buys/sells 全部原始資料（不限代號、不限日期）匯出成 JSON 字串，
+// 給「打包資料庫」指令用，讓使用者複製貼到 Claude 對話視窗保存/請 Claude 算結算，
+// 之後即使清空或精簡 DB 也有備份可還原。
+async function exportAllTradesJSON() {
+  const buys = (await pool.query(
+    `SELECT id, code, name, to_char(trade_date,'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, source
+     FROM buys ORDER BY trade_date, id`
+  )).rows;
+  const sells = (await pool.query(
+    `SELECT id, code, name, to_char(trade_date,'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, source
+     FROM sells ORDER BY trade_date, id`
+  )).rows;
+  return JSON.stringify({ exportedAt: new Date().toISOString(), buys: buys, sells: sells }, null, 0);
+}
+
 async function getGroups() {
   const buys = (await pool.query(
     `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note FROM buys ORDER BY trade_date, id`
@@ -302,8 +361,24 @@ function formatTransactionList(code, name, entries) {
 // ══════════════════════════════════════════
 
 // 固定關注的10檔（聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁）。
-// 「持股」查詢只鎖定這份清單，不再回補/掃描全部歷史訊號，避免拖慢速度、打爆報價API的429限流。
+// 「持股」查詢以這份清單為底，不再回補/掃描全部歷史訊號，避免拖慢速度、打爆報價API的429限流。
 const WATCHLIST_CODES = ["3081", "2426", "2351", "4991", "6805", "6213", "3374", "8021", "6239", "6285"];
+
+// 找出最近 N 天內有任何買賣紀錄的代號（不限來源，manual/backfill/correction都算）。
+// 用途：跟 WATCHLIST_CODES 聯集，讓「持股」除了固定10檔，也能抓到「即時偵測訊號→確認」
+// 新記錄下來、但不在原本10檔清單裡的股票，不會漏掉，且範圍仍侷限在近期、不用碰全部歷史。
+async function getRecentActiveCodes(days) {
+  const d = days || 14;
+  const { rows } = await pool.query(
+    `SELECT DISTINCT code FROM (
+       SELECT code FROM buys WHERE trade_date >= CURRENT_DATE - $1::int
+       UNION
+       SELECT code FROM sells WHERE trade_date >= CURRENT_DATE - $1::int
+     ) t`,
+    [d]
+  );
+  return rows.map(function (r) { return r.code; });
+}
 
 // codes 可選：不傳＝查全部歷史（給「結算」等仍需要完整資料的指令用），
 // 傳陣列＝只查指定代號（給「持股」用，資料量小很多，不用碰整張表）。
@@ -569,9 +644,9 @@ module.exports = {
   WATCHLIST_CODES,
   loadNameCache, getName, setName,
   addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill, deleteLegacyBackfillForCodes, wipeAllTrades,
-  getBackup, getRemaining, getHeldCodes,
+  getBackup, getRemaining, getHeldCodes, getSimpleInventory, formatSimpleInventory, exportAllTradesJSON,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,
-  getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode, getRecentActivityForCodes,
+  getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode, getRecentActivityForCodes, getRecentActiveCodes,
   forceAlignHoldings,
 };
