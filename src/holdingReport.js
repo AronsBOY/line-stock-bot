@@ -7,8 +7,10 @@ function round2(n) {
 }
 
 function weekdayOf(dateStr) {
-  const d = new Date(dateStr + "T00:00:00+08:00");
-  return Number.isNaN(d.getTime()) ? "" : WEEKDAYS[d.getDay()];
+  // 用 UTC 中午解析純日期，避免 Railway/Node 執行環境時區造成跨日。
+  // 例如 2026-09-10 在台灣是星期四，不應因 UTC 轉換變成 9/9。
+  const d = new Date(dateStr + "T12:00:00Z");
+  return Number.isNaN(d.getTime()) ? "" : WEEKDAYS[d.getUTCDay()];
 }
 
 function todayTW() {
