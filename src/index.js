@@ -8,7 +8,8 @@ const { setupScheduler, addSignal } = require("./scheduler");
 const portfolio = require("./portfolio");
 const pendingSignals = require("./pendingSignals");
 const { migrate } = require("./migrate");
-const HISTORICAL_SIGNALS = require("./historicalSignals");
+// historicalSignals.js（276筆歷史訊號）不再由 LINE Bot 讀取/回補/模擬——
+// 保留該檔案在repo裡當純資料封存，需要結算/歷史分析改請 Claude 用「打包資料庫」匯出的DB資料處理。
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -75,170 +76,6 @@ async function replyLongMessage(replyToken, to, text) {
   const firstBatch = chunks.slice(0, 5).map(function (c) { return { type: "text", text: c }; });
   await lineClient.replyMessage({ replyToken: replyToken, messages: firstBatch });
   if (chunks.length > 5) await pushLongMessage(to, chunks.slice(5).join("\n\n"));
-}
-
-async function runHistoricalBackfill() {
-  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, skippedNoHolding = 0, failed = 0;
-  for (const sig of HISTORICAL_SIGNALS) {
-    try {
-      const dateStr = sig.source_date;
-      const existing = await portfolio.findExisting(sig.stock_code, dateStr);
-      const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
-      if (sameSide.length > 0) { skippedDup++; await sleep(1800); continue; }
-      if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
-      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, sig.source_time);
-      if (!p) { skippedNoPrice++; await sleep(1800); continue; }
-      const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
-      if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, 1);
-        inserted++;
-      } else {
-        // 賣出：先查目前資料庫實際剩餘張數，「全部」就整個賣光、「一半」就精準賣一半（不四捨五入，例如3張賣一半=1.5張，一筆記錄完成）
-        const { remaining } = await portfolio.getRemaining(sig.stock_code);
-        if (remaining <= 0) { skippedNoHolding++; await sleep(1800); continue; }
-        const qtyToSell = sig.qty === "half" ? remaining / 2 : remaining;
-        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, qtyToSell);
-        inserted += 1;
-      }
-    } catch (err) {
-      failed++;
-      console.error("[回補歷史]", sig.stock_code, sig.source_date, err.message);
-    }
-    await sleep(1800); // 節流，避免對Yahoo/TWSE/TPEX打太密集觸發429
-  }
-  return { inserted, skippedDup, skippedNoPrice, skippedNoHolding, failed, total: HISTORICAL_SIGNALS.length };
-}
-
-async function runSimulation(capital) {
-  // capital: null = 無限資金；否則為起始現金（元）
-  const holdings = {}; // code -> [{price, date}]
-  let cash = capital;
-  let realizedPnl = 0;
-  const skippedBuys = [];
-  const skippedNoPrice = [];
-  const priceCache = {};
-
-  for (const sig of HISTORICAL_SIGNALS) {
-    if (sig.action !== "買入" && sig.action !== "賣出") continue;
-    const cacheKey = sig.stock_code + "-" + sig.source_date;
-    let price = priceCache[cacheKey];
-    if (price === undefined) {
-      const p = await fetchHistoricalPrice(sig.stock_code, sig.source_date, null);
-      price = p ? p.price : null;
-      priceCache[cacheKey] = price;
-      await sleep(1800);
-    }
-    if (price === null) { skippedNoPrice.push(sig.stock_code + " " + sig.source_date); continue; }
-
-    if (sig.action === "買入") {
-      const cost = price * 1000;
-      if (cash !== null && cash < cost) {
-        skippedBuys.push({ code: sig.stock_code, date: sig.source_date, price });
-        continue;
-      }
-      if (!holdings[sig.stock_code]) holdings[sig.stock_code] = [];
-      holdings[sig.stock_code].push({ price, date: sig.source_date });
-      if (cash !== null) cash -= cost;
-    } else {
-      const held = holdings[sig.stock_code] || [];
-      if (held.length === 0) continue;
-      const qtyToSell = sig.qty === "half" ? Math.max(1, Math.floor(held.length / 2)) : held.length;
-      for (let i = 0; i < qtyToSell; i++) {
-        const lot = held.shift();
-        realizedPnl += (price - lot.price) * 1000;
-        if (cash !== null) cash += price * 1000;
-      }
-    }
-  }
-
-  let unrealizedPnl = 0, remainingValue = 0;
-  const remainingPositions = [];
-  for (const code in holdings) {
-    const lots = holdings[code];
-    if (lots.length === 0) continue;
-    const p = await fetchStockPrice(code, null, null);
-    await sleep(1800);
-    const curPrice = p ? p.price : null;
-    const avgCost = lots.reduce(function (a, b) { return a + b.price; }, 0) / lots.length;
-    if (curPrice !== null) {
-      const value = curPrice * lots.length * 1000;
-      const cost = avgCost * lots.length * 1000;
-      unrealizedPnl += (value - cost);
-      remainingValue += value;
-      remainingPositions.push({ code, qty: lots.length, avgCost, curPrice, pnl: value - cost });
-    } else {
-      remainingPositions.push({ code, qty: lots.length, avgCost, curPrice: null, pnl: null });
-    }
-  }
-  remainingPositions.sort(function (a, b) { return (b.pnl || 0) - (a.pnl || 0); });
-
-  return {
-    capital, cash, realizedPnl, unrealizedPnl, remainingValue,
-    totalPnl: realizedPnl + unrealizedPnl,
-    remainingPositions, skippedBuys, skippedNoPrice,
-  };
-}
-
-function formatSimulationReport(title, result) {
-  let msg = "📊 " + title + "\n" + "─".repeat(20) + "\n";
-  if (result.capital !== null) {
-    msg += "起始資金：" + result.capital.toLocaleString() + " 元\n";
-    msg += "剩餘現金：" + Math.round(result.cash).toLocaleString() + " 元\n";
-  }
-  msg += "已實現損益：" + (result.realizedPnl >= 0 ? "+" : "") + Math.round(result.realizedPnl).toLocaleString() + " 元\n";
-  msg += "未實現損益：" + (result.unrealizedPnl >= 0 ? "+" : "") + Math.round(result.unrealizedPnl).toLocaleString() + " 元\n";
-  msg += "總損益：" + (result.totalPnl >= 0 ? "+" : "") + Math.round(result.totalPnl).toLocaleString() + " 元\n";
-  msg += "\n目前持有 " + result.remainingPositions.length + " 檔未平倉";
-  if (result.remainingPositions.length > 0) {
-    msg += "（前10檔，依損益排序）：\n";
-    result.remainingPositions.slice(0, 10).forEach(function (p) {
-      const name = portfolio.getName(p.code) || p.code;
-      if (p.curPrice !== null) {
-        msg += p.code + " " + name + " x" + p.qty + "張 均價" + p.avgCost.toFixed(1) + " 現價" + p.curPrice + " " + (p.pnl >= 0 ? "+" : "") + Math.round(p.pnl).toLocaleString() + "\n";
-      } else {
-        msg += p.code + " " + name + " x" + p.qty + "張（現價查無資料）\n";
-      }
-    });
-  }
-  if (result.capital !== null && result.skippedBuys.length > 0) {
-    msg += "\n⚠ 因資金不足跳過的買入：" + result.skippedBuys.length + " 筆";
-  }
-  if (result.skippedNoPrice.length > 0) {
-    msg += "\n⚠ 查無股價跳過：" + result.skippedNoPrice.length + " 筆";
-  }
-  return msg.trim();
-}
-
-async function runTargetedBackfill(codes) {
-  let inserted = 0, skippedDup = 0, skippedNoPrice = 0, skippedNoHolding = 0, failed = 0;
-  const targetSignals = HISTORICAL_SIGNALS.filter(function (s) { return codes.includes(s.stock_code); });
-  for (const sig of targetSignals) {
-    try {
-      const dateStr = sig.source_date;
-      const existing = await portfolio.findExisting(sig.stock_code, dateStr);
-      const sameSide = sig.action === "買入" ? existing.buys : existing.sells;
-      if (sameSide.length > 0) { skippedDup++; await sleep(1800); continue; }
-      if (sig.action !== "買入" && sig.action !== "賣出") { skippedNoPrice++; continue; }
-      const p = await fetchHistoricalPrice(sig.stock_code, dateStr, sig.source_time);
-      if (!p) { skippedNoPrice++; await sleep(1800); continue; }
-      const note = ((sig.source_time || "") + " " + (sig.original || "").slice(0, 60)).trim();
-      if (sig.action === "買入") {
-        await portfolio.addBuy(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, 1);
-        inserted += 1;
-      } else {
-        const { remaining } = await portfolio.getRemaining(sig.stock_code);
-        if (remaining <= 0) { skippedNoHolding++; await sleep(1800); continue; }
-        const qtyToSell = sig.qty === "half" ? remaining / 2 : remaining;
-        await portfolio.addSell(sig.stock_code, sig.stock_name, dateStr, p.price, sig.source_time, note, sig.group, sig.suggested_price, "backfill", p.priceType, qtyToSell);
-        inserted += 1;
-      }
-    } catch (err) {
-      failed++;
-      console.error("[回補持股]", sig.stock_code, sig.source_date, err.message);
-    }
-    await sleep(1800);
-  }
-  return { inserted, skippedDup, skippedNoPrice, skippedNoHolding, failed, total: targetSignals.length };
 }
 
 async function handleEvent(event) {
@@ -460,27 +297,42 @@ async function handleEvent(event) {
   }
 
   // ── 持股 ──
-  // 重新設計後：只鎖定固定10檔關注清單（portfolio.WATCHLIST_CODES），不再掃描/回補全部歷史訊號，
-  // 查詢範圍小很多，也不會再把即時報價API一次打爆導致429。額外附上這幾天的買賣指令記錄。
+  // 重新設計：只回傳「庫存持股」本身（代號/張數/均價/成本），不查即時股價、不算損益、不掃歷史結算。
+  // 查詢範圍 = 固定10檔(portfolio.WATCHLIST_CODES) + 最近14天內有買賣紀錄的代號，純DB加總，運算最輕量。
   if (text === "持股" || text === "我的持股") {
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
     try {
-      const codes = portfolio.WATCHLIST_CODES;
-      const episodes = await portfolio.getAllEpisodes(codes);
-      const openCodes = Object.keys(episodes).filter(function (c) { return episodes[c].openEpisode; });
-      let livePrices = {};
+      let codes = portfolio.WATCHLIST_CODES;
       try {
-        livePrices = await fetchMultipleStocks(openCodes);
-      } catch (priceErr) {
-        console.error("[持股] 查即時股價失敗，改顯示無現價版本：", priceErr.message);
-        livePrices = {}; // 查不到就都當作null，底下的格式化本來就支援現價缺漏時顯示「查詢中...」
+        const recentCodes = await portfolio.getRecentActiveCodes(14);
+        codes = Array.from(new Set(portfolio.WATCHLIST_CODES.concat(recentCodes)));
+      } catch (recentErr) {
+        console.error("[持股] 查最近活躍代號失敗，改只用固定10檔：", recentErr.message);
       }
-      const holdingMsg = await portfolio.getHoldingSummaryByEpisode(episodes, livePrices);
-      const recentMsg = await portfolio.getRecentActivityForCodes(codes, 3);
-      await pushLongMessage(sourceId, holdingMsg + "\n\n" + recentMsg);
+      const list = await portfolio.getSimpleInventory(codes);
+      const msg = portfolio.formatSimpleInventory(list);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     } catch (err) {
       console.error("[持股]", err.message);
-      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "查詢持股時發生錯誤：" + err.message }] }); } catch (e) {}
+      try { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢持股時發生錯誤：" + err.message }] }); } catch (e) {}
+    }
+    return;
+  }
+
+  // ── 打包資料庫（僅限老師本人或管理員）──
+  // 把 buys/sells 全部原始資料匯出成 JSON，用途：結算/歷史分析改成請 Claude 在對話視窗裡算，
+  // 這裡先把資料複製貼給 Claude 保存/分析即可，LINE Bot 本身不再跑這類重運算。
+  if (text === "打包資料庫") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "打包中，請稍候..." }] });
+    try {
+      const json = await portfolio.exportAllTradesJSON();
+      await pushLongMessage(sourceId, "📦 資料庫匯出（JSON，複製整段貼給 Claude）\n" + "─".repeat(20) + "\n" + json);
+    } catch (err) {
+      console.error("[打包資料庫]", err.message);
+      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "打包時發生錯誤：" + err.message }] }); } catch (e) {}
     }
     return;
   }
@@ -497,14 +349,9 @@ async function handleEvent(event) {
   }
 
   // ── 結算 ──
+  // 已移除：改由 Claude 對話視窗處理。先打「打包資料庫」匯出資料貼給 Claude 分析結算/損益。
   if (text === "結算" || text === "已結算") {
-    try {
-      const settled = await portfolio.getSettledSummaryByEpisode();
-      await replyLongMessage(replyToken, sourceId, settled.profitText + "\n\n" + settled.lossText + settled.footer);
-    } catch (err) {
-      console.error("[結算]", err.message);
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢結算時發生錯誤：" + err.message }] });
-    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "「結算」已經搬到 Claude 對話視窗處理囉，LINE Bot 這邊只提供「持股」（目前庫存）。\n要算結算/損益的話：先打「打包資料庫」把資料匯出，貼到 Claude 對話視窗請它幫你算。" }] });
     return;
   }
 
@@ -548,7 +395,7 @@ async function handleEvent(event) {
     try {
       const result = await portfolio.wipeAllTrades();
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
-        "✅ 已清空所有交易紀錄\n刪除買入：" + result.buys + " 筆\n刪除賣出：" + result.sells + " 筆\n\n可以重新輸入「回補持股」（只補10檔）或手動記錄"
+        "✅ 已清空所有交易紀錄\n刪除買入：" + result.buys + " 筆\n刪除賣出：" + result.sells + " 筆\n\n之後手動打「買/賣」指令記錄即可"
       }] });
     } catch (err) {
       console.error("[清空所有交易紀錄]", err.message);
@@ -575,93 +422,6 @@ async function handleEvent(event) {
     return;
   }
 
-  // ── 回補持股（僅限老師本人或管理員，只針對指定的10檔，快很多，不用碰其他270幾則訊號）──
-  if (text === "回補持股") {
-    if (!isAdmin(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
-      return;
-    }
-    const KEEP_CODES = portfolio.WATCHLIST_CODES;
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "先清掉這10檔既有的舊回補資料，再重新針對這10檔補齊訊號，預計1-2分鐘，完成後會通知你" }] });
-    try {
-      await portfolio.deleteLegacyBackfillForCodes(KEEP_CODES);
-      const result = await runTargetedBackfill(KEEP_CODES);
-      const msg = "✅ 持股回補完成\n" + "─".repeat(20) + "\n" +
-        "這10檔相關訊號數：" + result.total + "\n" +
-        "成功寫入：" + result.inserted + "\n" +
-        "跳過（同代號同日期已有紀錄）：" + result.skippedDup + "\n" +
-        "跳過（查無收盤價/方向不明）：" + result.skippedNoPrice + "\n" +
-        "跳過（賣出但當時無持股）：" + result.skippedNoHolding + "\n" +
-        "失敗：" + result.failed + "\n\n" +
-        "輸入「持股」查看結果";
-      await pushLongMessage(sourceId, msg);
-    } catch (err) {
-      console.error("[回補持股]", err.message);
-      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回補持股時發生錯誤：" + err.message }] }); } catch (e) {}
-    }
-    return;
-  }
-
-  // ── 回補歷史（僅限老師本人或管理員觸發，背景執行，完成後主動通知）──
-  if (text === "回補歷史") {
-    if (!isAdmin(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
-      return;
-    }
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始回補歷史訊號，共 " + HISTORICAL_SIGNALS.length + " 筆，預計需要幾分鐘，完成後會通知你" }] });
-    runHistoricalBackfill().then(async function (result) {
-      const msg = "✅ 歷史回補完成\n" + "─".repeat(20) + "\n" +
-        "總訊號數：" + result.total + "\n" +
-        "成功寫入：" + result.inserted + " 筆（含賣出訊號依全部/一半展開的張數）\n" +
-        "跳過（同代號同日期已有紀錄）：" + result.skippedDup + "\n" +
-        "跳過（查無收盤價/方向不明）：" + result.skippedNoPrice + "\n" +
-        "跳過（賣出訊號但當時無持股）：" + result.skippedNoHolding + "\n" +
-        "失敗：" + result.failed + "\n\n" +
-        "輸入「持股」或「結算」查看最新結果";
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
-    }).catch(async function (err) {
-      console.error("[回補歷史]", err.message);
-      try {
-        await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "回補過程發生錯誤：" + err.message }] });
-      } catch (e) {}
-    });
-    return;
-  }
-
-  // ── 模擬帳戶（無限資金）──
-  if (text === "模擬無限資金") {
-    if (!isAdmin(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
-      return;
-    }
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（無限資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
-    runSimulation(null).then(async function (result) {
-      const msg = formatSimulationReport("模擬帳戶績效（無限資金，完全依指令進出）", result);
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
-    }).catch(async function (err) {
-      console.error("[模擬無限資金]", err.message);
-      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "模擬過程發生錯誤：" + err.message }] }); } catch (e) {}
-    });
-    return;
-  }
-
-  // ── 模擬帳戶（1000萬資金上限）──
-  if (text === "模擬1000萬") {
-    if (!isAdmin(senderName)) {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
-      return;
-    }
-    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始跑模擬帳戶（1000萬資金），共 " + HISTORICAL_SIGNALS.length + " 筆訊號，預計需要幾分鐘..." }] });
-    runSimulation(10000000).then(async function (result) {
-      const msg = formatSimulationReport("模擬帳戶績效（1000萬資金，資金不足跳過買入）", result);
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: msg }] });
-    }).catch(async function (err) {
-      console.error("[模擬1000萬]", err.message);
-      try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "模擬過程發生錯誤：" + err.message }] }); } catch (e) {}
-    });
-    return;
-  }
-
   // ── 指令說明 ──
   if (text === "指令" || text === "help") {
     const msg =
@@ -670,8 +430,9 @@ async function handleEvent(event) {
       "【買賣記錄】\n買 3533 2026-04-23 10:04\n買 3533 2026-04-23\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
-      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
-      "【管理】\n清空所有交易紀錄（僅限老師本人，全部buys/sells砍掉重來，需輸入「我確定」二次確認）\n清除回補資料（僅限老師本人）\n回補持股（僅限老師本人，只回補指定10檔，較快）\n回補歷史（僅限老師本人，全部276則）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
+      "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股（目前庫存，不查即時股價，運算輕量）\n備份\n\n" +
+      "【結算/歷史分析】\n已搬到 Claude 對話視窗處理，LINE Bot 不再跑這類重運算。\n先打「打包資料庫」匯出資料，貼到 Claude 對話視窗請它算結算/損益。\n\n" +
+      "【管理】\n打包資料庫（僅限老師本人，匯出全部buys/sells成JSON，貼給Claude保存/分析）\n清空所有交易紀錄（僅限老師本人，全部buys/sells砍掉重來，需輸入「我確定」二次確認）\n清除回補資料（僅限老師本人）\n強制對齊持股（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }
