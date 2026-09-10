@@ -460,11 +460,14 @@ async function handleEvent(event) {
   }
 
   // ── 持股 ──
+  // 重新設計後：只鎖定固定10檔關注清單（portfolio.WATCHLIST_CODES），不再掃描/回補全部歷史訊號，
+  // 查詢範圍小很多，也不會再把即時報價API一次打爆導致429。額外附上這幾天的買賣指令記錄。
   if (text === "持股" || text === "我的持股") {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢中，請稍候..." }] });
     try {
-      const allEpisodes = await portfolio.getAllEpisodes();
-      const openCodes = Object.keys(allEpisodes).filter(function (c) { return allEpisodes[c].openEpisode; });
+      const codes = portfolio.WATCHLIST_CODES;
+      const episodes = await portfolio.getAllEpisodes(codes);
+      const openCodes = Object.keys(episodes).filter(function (c) { return episodes[c].openEpisode; });
       let livePrices = {};
       try {
         livePrices = await fetchMultipleStocks(openCodes);
@@ -472,8 +475,9 @@ async function handleEvent(event) {
         console.error("[持股] 查即時股價失敗，改顯示無現價版本：", priceErr.message);
         livePrices = {}; // 查不到就都當作null，底下的格式化本來就支援現價缺漏時顯示「查詢中...」
       }
-      const msg = await portfolio.getHoldingSummaryByEpisode(allEpisodes, livePrices);
-      await pushLongMessage(sourceId, msg);
+      const holdingMsg = await portfolio.getHoldingSummaryByEpisode(episodes, livePrices);
+      const recentMsg = await portfolio.getRecentActivityForCodes(codes, 3);
+      await pushLongMessage(sourceId, holdingMsg + "\n\n" + recentMsg);
     } catch (err) {
       console.error("[持股]", err.message);
       try { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "查詢持股時發生錯誤：" + err.message }] }); } catch (e) {}
@@ -510,7 +514,7 @@ async function handleEvent(event) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
-    const KEEP_CODES = ["3081","2426","2351","4991","6805","6213","3374","8021","6239","6285"]; // 聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁
+    const KEEP_CODES = portfolio.WATCHLIST_CODES; // 聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "開始強制對齊，只保留這10檔：聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁，其他持股會用現在的即時股價強制結清，請稍候..." }] });
     try {
       const result = await portfolio.forceAlignHoldings(KEEP_CODES, function(code) { return fetchStockPrice(code, null, null); });
@@ -523,6 +527,32 @@ async function handleEvent(event) {
     } catch (err) {
       console.error("[強制對齊持股]", err.message);
       await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "強制對齊時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
+
+  // ── 清空所有交易紀錄（僅限老師本人或管理員，危險操作：buys/sells 全部清空，不分來源、含手動輸入的，無法復原，需二次確認）──
+  if (text === "清空所有交易紀錄") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "⚠️ 這會清空「所有」買賣紀錄（含手動輸入的），無法復原。\n確定要執行的話，請輸入：清空所有交易紀錄 我確定" }] });
+    return;
+  }
+  if (text === "清空所有交易紀錄 我確定") {
+    if (!isAdmin(senderName)) {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
+      return;
+    }
+    try {
+      const result = await portfolio.wipeAllTrades();
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
+        "✅ 已清空所有交易紀錄\n刪除買入：" + result.buys + " 筆\n刪除賣出：" + result.sells + " 筆\n\n可以重新輸入「回補持股」（只補10檔）或手動記錄"
+      }] });
+    } catch (err) {
+      console.error("[清空所有交易紀錄]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "清空時發生錯誤：" + err.message }] });
     }
     return;
   }
@@ -551,7 +581,7 @@ async function handleEvent(event) {
       await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用（偵測到你目前的名稱是：「" + senderName + "」，請確認跟 ADMIN_NAMES 有對上）" }] });
       return;
     }
-    const KEEP_CODES = ["3081","2426","2351","4991","6805","6213","3374","8021","6239","6285"];
+    const KEEP_CODES = portfolio.WATCHLIST_CODES;
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "先清掉這10檔既有的舊回補資料，再重新針對這10檔補齊訊號，預計1-2分鐘，完成後會通知你" }] });
     try {
       await portfolio.deleteLegacyBackfillForCodes(KEEP_CODES);
@@ -641,7 +671,7 @@ async function handleEvent(event) {
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
       "【查詢】\n查股 2330\n查股 2330 2026-04-23\n查股 2330 2026-04-23 10:04\n新聞 2330\n明細 3533\n明細 3533 進階組\n持股\n結算\n備份\n\n" +
-      "【管理】\n清除回補資料（僅限老師本人）\n回補持股（僅限老師本人，只回補指定10檔，較快）\n回補歷史（僅限老師本人，全部276則）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
+      "【管理】\n清空所有交易紀錄（僅限老師本人，全部buys/sells砍掉重來，需輸入「我確定」二次確認）\n清除回補資料（僅限老師本人）\n回補持股（僅限老師本人，只回補指定10檔，較快）\n回補歷史（僅限老師本人，全部276則）\n強制對齊持股（僅限老師本人）\n模擬無限資金（僅限老師本人）\n模擬1000萬（僅限老師本人）";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
   }

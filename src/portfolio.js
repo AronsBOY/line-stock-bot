@@ -50,6 +50,14 @@ async function deleteBySource(source) {
   return { buys: b.rowCount, sells: s.rowCount };
 }
 
+// ⚠️ 危險操作：不分來源，清空 buys/sells 兩張表全部資料（含手動輸入的），無法復原。
+// 只給「清空所有交易紀錄」指令用，且該指令在 index.js 有二次確認保護。
+async function wipeAllTrades() {
+  const b = await pool.query(`DELETE FROM buys`);
+  const s = await pool.query(`DELETE FROM sells`);
+  return { buys: b.rowCount, sells: s.rowCount };
+}
+
 // 專門清掉所有「不是手動打指令」來源的資料：
 // - backfill（回補歷史寫入的）
 // - correction（強制對齊持股留下的）
@@ -293,14 +301,23 @@ function formatTransactionList(code, name, entries) {
 // 持股歸零＝一輪結束（已結算），歸零後的新買入＝開新的一輪（可能還在持股中）
 // ══════════════════════════════════════════
 
-async function getAllRawEvents() {
+// 固定關注的10檔（聯亞/鼎元/順德/環宇/富世達/聯茂/精材/尖點/力成/啟碁）。
+// 「持股」查詢只鎖定這份清單，不再回補/掃描全部歷史訊號，避免拖慢速度、打爆報價API的429限流。
+const WATCHLIST_CODES = ["3081", "2426", "2351", "4991", "6805", "6213", "3374", "8021", "6239", "6285"];
+
+// codes 可選：不傳＝查全部歷史（給「結算」等仍需要完整資料的指令用），
+// 傳陣列＝只查指定代號（給「持股」用，資料量小很多，不用碰整張表）。
+async function getAllRawEvents(codes) {
+  const hasFilter = Array.isArray(codes) && codes.length > 0;
   const buys = (await pool.query(
     `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, id
-     FROM buys ORDER BY trade_date, signal_time NULLS FIRST, id`
+     FROM buys` + (hasFilter ? ` WHERE code = ANY($1)` : ``) + ` ORDER BY trade_date, signal_time NULLS FIRST, id`,
+    hasFilter ? [codes] : []
   )).rows;
   const sells = (await pool.query(
     `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, note, group_tag, suggested_price, price_type, qty, id
-     FROM sells ORDER BY trade_date, signal_time NULLS FIRST, id`
+     FROM sells` + (hasFilter ? ` WHERE code = ANY($1)` : ``) + ` ORDER BY trade_date, signal_time NULLS FIRST, id`,
+    hasFilter ? [codes] : []
   )).rows;
   const byCode = {};
   function ensure(code) { if (!byCode[code]) byCode[code] = { buys: [], sells: [] }; return byCode[code]; }
@@ -358,13 +375,44 @@ function buildEpisodes(rawEvents) {
   return { closedEpisodes: closedEpisodes, openEpisode: current, orphanSells: orphanSells };
 }
 
-async function getAllEpisodes() {
-  const byCode = await getAllRawEvents();
+async function getAllEpisodes(codes) {
+  const byCode = await getAllRawEvents(codes);
   const result = {}; // code -> { closedEpisodes, openEpisode, orphanSells }
   for (const code in byCode) {
     result[code] = buildEpisodes(byCode[code]);
   }
   return result;
+}
+
+// 「這幾天指令」：只列出最近 N 天、指定代號清單內的買賣紀錄，純粹查表格式化，不算損益、不查即時股價。
+async function getRecentActivityForCodes(codes, days) {
+  const d = days || 3;
+  const buys = (await pool.query(
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, qty
+     FROM buys WHERE code = ANY($1) AND trade_date >= CURRENT_DATE - $2::int
+     ORDER BY trade_date DESC, signal_time DESC NULLS LAST, id DESC`,
+    [codes, d]
+  )).rows;
+  const sells = (await pool.query(
+    `SELECT code, name, to_char(trade_date, 'YYYY-MM-DD') AS trade_date, price, signal_time, qty
+     FROM sells WHERE code = ANY($1) AND trade_date >= CURRENT_DATE - $2::int
+     ORDER BY trade_date DESC, signal_time DESC NULLS LAST, id DESC`,
+    [codes, d]
+  )).rows;
+  const events = buys.map(function (b) { return { type: "買入", date: b.trade_date, time: b.signal_time, code: b.code, name: b.name, price: parseFloat(b.price), qty: b.qty }; })
+    .concat(sells.map(function (s) { return { type: "賣出", date: s.trade_date, time: s.signal_time, code: s.code, name: s.name, price: parseFloat(s.price), qty: s.qty }; }));
+  events.sort(function (a, b) {
+    const ka = a.date + " " + (a.time || "00:00");
+    const kb = b.date + " " + (b.time || "00:00");
+    return ka < kb ? 1 : -1;
+  });
+  if (!events.length) return "【最近 " + d + " 天指令】\n（無）";
+  let txt = "【最近 " + d + " 天指令】\n";
+  events.forEach(function (e) {
+    const timePart = e.time ? " " + e.time : "";
+    txt += e.date + timePart + "　" + e.code + " " + (e.name || "") + "　" + e.type + "　" + round2(e.qty) + "張 @" + e.price.toFixed(2) + "\n";
+  });
+  return txt.trim();
 }
 
 function round2(n) {
@@ -518,11 +566,12 @@ async function deleteLegacyBackfillForCodes(codes) {
 }
 
 module.exports = {
+  WATCHLIST_CODES,
   loadNameCache, getName, setName,
-  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill, deleteLegacyBackfillForCodes,
+  addBuy, addSell, findExisting, cancelEntry, adjustPrice, deleteBySource, deleteLegacyBackfill, deleteLegacyBackfillForCodes, wipeAllTrades,
   getBackup, getRemaining, getHeldCodes,
   getHoldingSummary, getSettledSummary, getSettledSummarySplit,
   getTransactionList, formatTransactionList,
-  getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode,
+  getAllEpisodes, getHoldingSummaryByEpisode, getSettledSummaryByEpisode, getRecentActivityForCodes,
   forceAlignHoldings,
 };
