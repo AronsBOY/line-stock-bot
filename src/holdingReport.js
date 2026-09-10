@@ -45,12 +45,12 @@ function formatEntry(e, index) {
   const time = e.time || "無";
   const range = e.suggestedPrice || "無";
   const priceType = e.priceType || "收盤價";
-  return "　" + (index + 1) + ". [買] " + e.date + "(" + weekday + ") " + time +
-    "【價位】" + range + "【" + priceType + "】" + Number(e.price).toFixed(2);
+  return (index + 1) + ". [買] " + e.date + "(" + weekday + ") " + time +
+    "\n   價位：" + range +
+    "｜" + priceType + "：" + Number(e.price).toFixed(2);
 }
 
 async function buildHoldingReport(portfolio) {
-  // 持股庫存必須列出所有尚未出清的股票，不能只靠固定清單或最近 N 天交易。
   const allEpisodes = await portfolio.getAllEpisodes();
   const openCodes = Object.keys(allEpisodes)
     .filter(function (code) {
@@ -60,10 +60,11 @@ async function buildHoldingReport(portfolio) {
 
   const today = todayTW();
   const todayLabel = today + "(" + weekdayOf(today) + ")";
-  const divider = "═".repeat(20);
+  const divider = "════════════════════";
+  const section = "────────────────────";
 
   if (!openCodes.length) {
-    return "【持股庫存】【" + todayLabel + "】\n\n" + divider + "\n\n目前無持股";
+    return "【持股庫存】\n" + todayLabel + "\n" + divider + "\n目前無持股";
   }
 
   let livePrices = {};
@@ -90,44 +91,49 @@ async function buildHoldingReport(portfolio) {
 
     totalCost += cost;
 
-    let block = code + " " + name +
-      "　買入次數：" + buys.length +
-      "　均價：" + avg.toFixed(2) +
-      "　持股：" + formatShares(qtyLots) + " 股" +
-      "　成本：" + formatMoney(cost) + " 元\n\n";
+    let block = "📌 " + code + " " + name + "\n";
+    block += "買入次數：" + buys.length + "｜均價：" + avg.toFixed(2) + "\n";
+    block += "持股：" + formatShares(qtyLots) + " 股｜成本：" + formatMoney(cost) + " 元\n";
+    block += section + "\n";
 
     buys.forEach(function (e, index) {
-      block += formatEntry(e, index) + "\n\n";
+      block += formatEntry(e, index) + "\n";
+      if (index < buys.length - 1) block += "\n";
     });
+
+    block += "\n" + section + "\n";
 
     if (curPrice !== null && avg > 0) {
       const pct = (curPrice - avg) / avg * 100;
       const pnl = (curPrice - avg) * qtyLots * 1000;
       totalPnl += pnl;
       pricedCount++;
-      block += "　現價：" + curPrice + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct).toFixed(2) + "%\n\n";
-      block += "　未實現損益：" + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + " 元";
+      block += "現價：" + curPrice + " " + (pct >= 0 ? "▲" : "▼") + Math.abs(pct).toFixed(2) + "%\n";
+      block += "未實現損益：" + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + " 元";
     } else {
-      block += "　現價：查無資料\n\n";
-      block += "　未實現損益：暫無法計算";
+      block += "現價：查無資料\n";
+      block += "未實現損益：暫無法計算";
     }
 
     blocks.push(block);
   });
 
-  let footer = divider +
-    "\n\n總持股：" + openCodes.length + " 支" +
-    "\n\n總成本：" + formatMoney(totalCost) + " 元";
+  let footer = "📊 總覽\n";
+  footer += "總持股：" + openCodes.length + " 支\n";
+  footer += "總成本：" + formatMoney(totalCost) + " 元\n";
 
   if (pricedCount === openCodes.length) {
-    footer += "\n\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) + " 元";
+    footer += "總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) + " 元";
   } else if (pricedCount > 0) {
-    footer += "\n\n總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) + " 元（僅計入已取得現價的 " + pricedCount + " 支）";
+    footer += "總未實現損益：" + (totalPnl >= 0 ? "+" : "") + formatMoney(totalPnl) +
+      " 元（已取得現價 " + pricedCount + "/" + openCodes.length + " 支）";
   } else {
-    footer += "\n\n總未實現損益：暫無法計算";
+    footer += "總未實現損益：暫無法計算";
   }
 
-  return "【持股庫存】【" + todayLabel + "】\n\n" + divider + "\n\n" + blocks.join("\n\n") + "\n\n" + footer;
+  return "【持股庫存】\n" + todayLabel + "\n" + divider + "\n\n" +
+    blocks.join("\n\n" + divider + "\n\n") +
+    "\n\n" + divider + "\n" + footer;
 }
 
 module.exports = { buildHoldingReport };
