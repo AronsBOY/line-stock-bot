@@ -1,0 +1,72 @@
+{
+  "exportedAt": "2026-09-10",
+  "note": "歷史交易紀錄已清空，只保留 2026-09-10 定稿的庫存持股作為起始資料。之後所有異動一律：先偵測訊號 -> 使用者輸入「確認」-> 才寫入這份資料。",
+  "holdings": {
+    "2426": {
+      "name": "鼎元",
+      "entries": [
+        { "date": "2026-09-01", "weekday": "二", "time": "10:20", "priceRange": "無", "priceType": "收盤價", "price": 100.00, "shares": 1000 }
+      ]
+    },
+    "3529": {
+      "name": "力旺",
+      "entries": [
+        { "date": "2026-09-09", "weekday": "三", "time": "09:22", "priceRange": "平盤以下", "priceType": "收盤價", "price": 2755.00, "shares": 1000 }
+      ]
+    },
+    "4991": {
+      "name": "環宇",
+      "entries": [
+        { "date": "2026-06-12", "weekday": "五", "time": "10:22", "priceRange": "570以下", "priceType": "時價", "price": 571.00, "shares": 1000 },
+        { "date": "2026-07-06", "weekday": "一", "time": "無", "priceRange": "無", "priceType": "時價", "price": 553.00, "shares": 1000 },
+        { "date": "2026-08-04", "weekday": "二", "time": "無", "priceRange": "無", "priceType": "時價", "price": 426.50, "shares": 1000 },
+        { "date": "2026-08-06", "weekday": "四", "time": "無", "priceRange": "440-450", "priceType": "時價", "price": 444.00, "shares": 1000 },
+        { "date": "2026-08-12", "weekday": "三", "time": "無", "priceRange": "無", "priceType": "時價", "price": 471.50, "shares": 1000 }
+      ]
+    },
+    "6213": {
+      "name": "聯茂",
+      "entries": [
+        { "date": "2026-09-02", "weekday": "三", "time": "09:54", "priceRange": "無", "priceType": "收盤價", "price": 560.00, "shares": 1000 },
+        { "date": "2026-09-04", "weekday": "五", "time": "10:27", "priceRange": "平盤510以下", "priceType": "收盤價", "price": 510.00, "shares": 1000 }
+      ]
+    },
+    "6239": {
+      "name": "力成",
+      "entries": [
+        { "date": "2026-06-15", "weekday": "一", "time": "12:32", "priceRange": "320-330附近", "priceType": "時價", "price": 331.50, "shares": 1000 },
+        { "date": "2026-06-17", "weekday": "三", "time": "10:53", "priceRange": "345-350附近", "priceType": "時價", "price": 348.50, "shares": 1000 },
+        { "date": "2026-06-23", "weekday": "二", "time": "11:56", "priceRange": "335-340附近", "priceType": "時價", "price": 342.00, "shares": 1000 },
+        { "date": "2026-06-25", "weekday": "四", "time": "10:48", "priceRange": "無", "priceType": "時價", "price": 329.00, "shares": 1000 },
+        { "date": "2026-08-05", "weekday": "三", "time": "10:21", "priceRange": "260-265附近", "priceType": "時價", "price": 264.50, "shares": 1000 }
+      ]
+    },
+    "6285": {
+      "name": "啟碁",
+      "entries": [
+        { "date": "2026-07-23", "weekday": "四", "time": "10:13", "priceRange": "255-265", "priceType": "時價", "price": 257.00, "shares": 1000 },
+        { "date": "2026-07-24", "weekday": "五", "time": "09:27", "priceRange": "無", "priceType": "時價", "price": 256.50, "shares": 1000 },
+        { "date": "2026-08-06", "weekday": "四", "time": "09:56", "priceRange": "245-248", "priceType": "時價", "price": 247.50, "shares": 1000 }
+      ]
+    },
+    "6669": {
+      "name": "緯穎",
+      "entries": [
+        { "date": "2026-09-09", "weekday": "三", "time": "10:32", "priceRange": "2350-2400附近", "priceType": "收盤價", "price": 2385.00, "shares": 1000 }
+      ]
+    },
+    "6805": {
+      "name": "富世達",
+      "entries": [
+        { "date": "2026-08-19", "weekday": "三", "time": "09:23", "priceRange": "1900以下", "priceType": "時價", "price": 1925.00, "shares": 1000 }
+      ]
+    },
+    "8021": {
+      "name": "尖點",
+      "entries": [
+        { "date": "2026-08-28", "weekday": "五", "time": "10:14", "priceRange": "無", "priceType": "收盤價", "price": 454.00, "shares": 1000 },
+        { "date": "2026-08-31", "weekday": "一", "time": "09:18", "priceRange": "無", "priceType": "收盤價", "price": 435.00, "shares": 1000 }
+      ]
+    }
+  }
+}
