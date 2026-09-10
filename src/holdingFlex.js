@@ -75,7 +75,6 @@ async function buildHoldingFlex(portfolio) {
     if (i > 0) bodyContents.push({ type: "separator", margin: "md", color: "#E5E7EB" });
     bodyContents.push({
       type: "box", layout: "vertical", margin: i ? "md" : "none", spacing: "xs",
-      action: { type: "message", label: "查看 " + r.code + " 明細", text: "明細 " + r.code },
       contents: [
         { type: "box", layout: "horizontal", contents: [
           text(r.code + " " + r.name, "sm", "bold", "#111827", null, 3),
@@ -123,7 +122,7 @@ async function buildHoldingFlex(portfolio) {
             text("未實現損益", "sm", "bold", "#374151", null, 2),
             text((totalPnl >= 0 ? "+" : "") + fmtMoney(totalPnl) + " 元", "sm", "bold", totalPnl >= 0 ? "#D32F2F" : "#16803C", "end", 3)
           ]},
-          text("點任一股票可查看買進明細", "xxs", null, "#9CA3AF", "center")
+          text("完整買進紀錄：輸入「庫存持股明細」", "xxs", null, "#9CA3AF", "center")
         ]
       }
     }
