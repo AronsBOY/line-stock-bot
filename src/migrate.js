@@ -1,5 +1,6 @@
 require("dotenv").config();
 const pool = require("./db");
+const KNOWN_STOCK_NAMES = require("./knownStockNames");
 
 // 這是你原本寫死在 portfolio.js 裡的資料，
 // 只在資料庫是空的（第一次部署）時會被匯入一次，之後不會重複匯入。
@@ -13,8 +14,6 @@ const CODE_NAMES_SEED = {
   "3563": "牧德", "3665": "貿聯KY",
 };
 
-// 從 269 則歷史訊號原文裡自動抓出的股票中文名（回補歷史時很多股票沒有中文名，用這批補上）
-// 只在 code_names 表裡「該代號還沒有名稱」時才會寫入，不會覆蓋掉你手動用「名稱」指令設定過的
 const EXTRA_CODE_NAMES = {"1560":"中砂", "1802":"玻玻", "2303":"聯電", "2327":"國巨", "2344":"華邦電", "2351":"順德", "2360":"致茂", "2368":"金像電", "2426":"鼎元", "2441":"超豐", "3017":"奇鋐", "3037":"欣興", "3081":"聯亞", "3167":"大量", "3189":"景碩", "3211":"順達", "3264":"欣銓", "3324":"雙鴻", "3374":"精材", "3443":"創意", "3450":"聯鈞", "3532":"台勝科", "3533":"嘉澤", "3535":"晶彩科", "3563":"牧德", "3653":"健策", "3665":"貿聯KY", "3715":"定穎", "4722":"國精化", "4749":"新應材", "4760":"勤凱", "4931":"新盛力", "4966":"譜瑞KY", "4971":"IET-KY", "4989":"榮科", "4991":"環宇", "5284":"JPP", "5347":"世界", "5439":"高技", "5475":"德宏", "6173":"信昌電", "6187":"萬潤", "6213":"聯茂", "6239":"力成", "6257":"矽格", "6261":"久元", "6285":"啟碁", "6415":"矽力KY", "6531":"愛普", "6640":"均華", "6739":"竹陞科技", "6781":"華景電", "6788":"華景電", "6789":"采鈺", "6805":"富世達", "7734":"印能", "7751":"竑騰", "7828":"創新服務", "7853":"政美應用", "8021":"尖點", "8150":"南茂", "8227":"巨有", "8996":"高力"};
 
 const BUYS_SEED = [
@@ -129,84 +128,27 @@ async function migrate() {
   try {
     await client.query("BEGIN");
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS code_names (
-        code TEXT PRIMARY KEY,
-        name TEXT NOT NULL
-      );
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS buys (
-        id SERIAL PRIMARY KEY,
-        code TEXT NOT NULL,
-        name TEXT,
-        trade_date DATE NOT NULL,
-        price NUMERIC NOT NULL,
-        signal_time TEXT,
-        note TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS sells (
-        id SERIAL PRIMARY KEY,
-        code TEXT NOT NULL,
-        name TEXT,
-        trade_date DATE NOT NULL,
-        price NUMERIC NOT NULL,
-        signal_time TEXT,
-        note TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
-    // 對舊版本（第一階段已部署過）的資料庫做欄位補丁，新增備註/時間欄位
+    await client.query(`CREATE TABLE IF NOT EXISTS code_names (code TEXT PRIMARY KEY, name TEXT NOT NULL);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS buys (id SERIAL PRIMARY KEY, code TEXT NOT NULL, name TEXT, trade_date DATE NOT NULL, price NUMERIC NOT NULL, signal_time TEXT, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS sells (id SERIAL PRIMARY KEY, code TEXT NOT NULL, name TEXT, trade_date DATE NOT NULL, price NUMERIC NOT NULL, signal_time TEXT, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());`);
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS signal_time TEXT;`);
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS note TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS signal_time TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS note TEXT;`);
-    // 進階組／基本組分類欄位
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS group_tag TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS group_tag TEXT;`);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS pending_signals (
-        code TEXT PRIMARY KEY,
-        action TEXT NOT NULL,
-        signal_date DATE NOT NULL,
-        signal_time TEXT NOT NULL,
-        price NUMERIC,
-        suggested_price TEXT,
-        original TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
-    // 這張表這階段先建起來，第三階段做收盤報告時才會開始寫入使用
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS daily_signals (
-        id SERIAL PRIMARY KEY,
-        code TEXT NOT NULL,
-        name TEXT,
-        action TEXT NOT NULL,
-        signal_date DATE NOT NULL,
-        signal_time TEXT NOT NULL,
-        suggested_price TEXT,
-        original TEXT,
-        sender TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
+    await client.query(`CREATE TABLE IF NOT EXISTS pending_signals (code TEXT PRIMARY KEY, action TEXT NOT NULL, signal_date DATE NOT NULL, signal_time TEXT NOT NULL, price NUMERIC, suggested_price TEXT, original TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS daily_signals (id SERIAL PRIMARY KEY, code TEXT NOT NULL, name TEXT, action TEXT NOT NULL, signal_date DATE NOT NULL, signal_time TEXT NOT NULL, suggested_price TEXT, original TEXT, sender TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_buys_code ON buys(code);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sells_code ON sells(code);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_daily_signals_date ON daily_signals(signal_date);`);
     await client.query(`ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS group_tag TEXT;`);
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS suggested_price TEXT;`);
-    // 標記這筆紀錄是怎麼進來的：manual=手動指令、backfill=歷史回補、signal=即時訊號確認
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';`);
-    // 標記這筆的實際價位是「時價」（精確時間點成交價）還是「收盤價」（找不到精確時間退而求其次用當日收盤）
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS price_type TEXT;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS price_type TEXT;`);
-    // 每一筆實際的數量（張），預設1張，支援分數（例如3張賣一半=1.5張，不用四捨五入）
     await client.query(`ALTER TABLE buys ADD COLUMN IF NOT EXISTS qty NUMERIC DEFAULT 1;`);
     await client.query(`ALTER TABLE sells ADD COLUMN IF NOT EXISTS qty NUMERIC DEFAULT 1;`);
 
@@ -214,39 +156,33 @@ async function migrate() {
     if (rows[0].n === 0) {
       console.log("[Migrate] buys 資料表為空，開始匯入既有持股資料...");
       for (const code in CODE_NAMES_SEED) {
-        await client.query(
-          `INSERT INTO code_names (code, name) VALUES ($1, $2)
-           ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name`,
-          [code, CODE_NAMES_SEED[code]]
-        );
+        await client.query(`INSERT INTO code_names (code, name) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name`, [code, CODE_NAMES_SEED[code]]);
       }
-      for (const b of BUYS_SEED) {
-        await client.query(
-          `INSERT INTO buys (code, name, trade_date, price) VALUES ($1, $2, $3, $4)`,
-          [b.code, CODE_NAMES_SEED[b.code] || b.code, b.date, b.price]
-        );
-      }
-      for (const s of SELLS_SEED) {
-        await client.query(
-          `INSERT INTO sells (code, name, trade_date, price) VALUES ($1, $2, $3, $4)`,
-          [s.code, CODE_NAMES_SEED[s.code] || s.code, s.date, s.price]
-        );
-      }
-      console.log("[Migrate] 匯入完成：" + BUYS_SEED.length + " 筆買入、" + SELLS_SEED.length + " 筆賣出、" + Object.keys(CODE_NAMES_SEED).length + " 個股票名稱");
+      for (const b of BUYS_SEED) await client.query(`INSERT INTO buys (code, name, trade_date, price) VALUES ($1, $2, $3, $4)`, [b.code, CODE_NAMES_SEED[b.code] || b.code, b.date, b.price]);
+      for (const s of SELLS_SEED) await client.query(`INSERT INTO sells (code, name, trade_date, price) VALUES ($1, $2, $3, $4)`, [s.code, CODE_NAMES_SEED[s.code] || s.code, s.date, s.price]);
+      console.log("[Migrate] 匯入完成：" + BUYS_SEED.length + " 筆買入、" + SELLS_SEED.length + " 筆賣出");
     } else {
       console.log("[Migrate] buys 資料表已有 " + rows[0].n + " 筆資料，略過種子匯入");
     }
 
-    // 補上從歷史訊號原文抓到的股票名稱，只在該代號目前還沒有名稱時才寫入，不會覆蓋掉已設定的
-    let addedNames = 0;
     for (const code in EXTRA_CODE_NAMES) {
-      const r = await client.query(
-        `INSERT INTO code_names (code, name) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING`,
-        [code, EXTRA_CODE_NAMES[code]]
-      );
-      if (r.rowCount > 0) addedNames++;
+      await client.query(`INSERT INTO code_names (code, name) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING`, [code, EXTRA_CODE_NAMES[code]]);
     }
-    if (addedNames > 0) console.log("[Migrate] 補上 " + addedNames + " 個股票名稱");
+
+    // 每次啟動都同步最新版 knownStockNames。
+    // 只修正資料庫中缺少名稱、名稱等於股票代號的紀錄；不覆蓋使用者手動設定的自訂名稱。
+    let syncedNames = 0;
+    for (const code in KNOWN_STOCK_NAMES) {
+      const name = KNOWN_STOCK_NAMES[code];
+      const existing = await client.query(`SELECT name FROM code_names WHERE code=$1`, [code]);
+      if (!existing.rows.length || !existing.rows[0].name || existing.rows[0].name === code) {
+        await client.query(`INSERT INTO code_names (code, name) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name`, [code, name]);
+        syncedNames++;
+      }
+      await client.query(`UPDATE buys SET name=$2 WHERE code=$1 AND (name IS NULL OR name='' OR name=$1)`, [code, name]);
+      await client.query(`UPDATE sells SET name=$2 WHERE code=$1 AND (name IS NULL OR name='' OR name=$1)`, [code, name]);
+    }
+    if (syncedNames > 0) console.log("[Migrate] 同步/修正 " + syncedNames + " 個股票名稱");
 
     await client.query("COMMIT");
     console.log("[Migrate] 資料庫結構就緒");
@@ -260,9 +196,7 @@ async function migrate() {
 }
 
 if (require.main === module) {
-  migrate()
-    .then(function () { process.exit(0); })
-    .catch(function () { process.exit(1); });
+  migrate().then(function () { process.exit(0); }).catch(function () { process.exit(1); });
 }
 
 module.exports = { migrate };
