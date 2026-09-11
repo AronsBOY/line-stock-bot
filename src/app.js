@@ -9,6 +9,8 @@ const portfolio = require("./portfolio");
 const pendingSignals = require("./pendingSignals");
 const { migrate } = require("./migrate");
 
+const SETTLEMENT_START_DATE = "2026-09-11";
+
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -177,6 +179,71 @@ async function processDetectedSignals(senderLabel, signalText, dateStr, timeStr)
     });
   }
   return msgs;
+}
+
+function settlementEpisodeStats(entries) {
+  const buys = entries.filter(function(e) { return e.type === "買"; });
+  const sells = entries.filter(function(e) { return e.type === "賣"; });
+  const buyQty = buys.reduce(function(sum, e) { return sum + e.qty; }, 0);
+  const sellQty = sells.reduce(function(sum, e) { return sum + e.qty; }, 0);
+  const buyValue = buys.reduce(function(sum, e) { return sum + e.price * e.qty; }, 0);
+  const sellValue = sells.reduce(function(sum, e) { return sum + e.price * e.qty; }, 0);
+  const avgBuy = buyQty > 0 ? buyValue / buyQty : 0;
+  const avgSell = sellQty > 0 ? sellValue / sellQty : 0;
+  const cost = buyValue * 1000;
+  const proceeds = sellValue * 1000;
+  const pnl = proceeds - cost;
+  const pct = cost > 0 ? pnl / cost * 100 : 0;
+  return { buyQty, sellQty, avgBuy, avgSell, pnl, pct };
+}
+
+async function buildSettlementSummary(mode, today) {
+  const allEpisodes = await portfolio.getAllEpisodes();
+  const items = [];
+  for (const code in allEpisodes) {
+    const info = allEpisodes[code];
+    info.closedEpisodes.forEach(function(ep, idx) {
+      if (!ep.entries.length) return;
+      const closeEvent = ep.entries[ep.entries.length - 1];
+      const closeDate = closeEvent.date;
+      if (closeDate < SETTLEMENT_START_DATE) return;
+      if (mode === "today" && closeDate !== today) return;
+      const stats = settlementEpisodeStats(ep.entries);
+      items.push({
+        code,
+        name: portfolio.getName(code) || code,
+        round: idx + 1,
+        closeDate,
+        closeTime: closeEvent.time || "",
+        qty: stats.buyQty,
+        avgBuy: stats.avgBuy,
+        avgSell: stats.avgSell,
+        pnl: stats.pnl,
+        pct: stats.pct,
+      });
+    });
+  }
+
+  items.sort(function(a, b) {
+    const ka = a.closeDate + " " + a.closeTime;
+    const kb = b.closeDate + " " + b.closeTime;
+    return ka < kb ? 1 : ka > kb ? -1 : 0;
+  });
+
+  const title = mode === "today" ? "【今日結算】" + today : "【已結算】自 " + SETTLEMENT_START_DATE + " 起";
+  if (!items.length) return title + "\n目前沒有符合條件的已結算輪次";
+
+  let totalPnl = 0;
+  let txt = title + "\n" + "═".repeat(20) + "\n";
+  items.forEach(function(item) {
+    totalPnl += item.pnl;
+    txt += item.code + " " + item.name + "｜" + item.closeDate + (item.closeTime ? " " + item.closeTime : "") + "\n";
+    txt += "  賣光結算｜" + (Math.round(item.qty * 100) / 100) + " 張\n";
+    txt += "  均買：" + item.avgBuy.toFixed(2) + "　均賣：" + item.avgSell.toFixed(2) + "\n";
+    txt += "  損益：" + (item.pnl >= 0 ? "+" : "") + Math.round(item.pnl).toLocaleString() + " 元（" + (item.pct >= 0 ? "+" : "") + item.pct.toFixed(2) + "%）\n\n";
+  });
+  txt += "═".repeat(20) + "\n共 " + items.length + " 輪｜合計：" + (totalPnl >= 0 ? "+" : "") + Math.round(totalPnl).toLocaleString() + " 元";
+  return txt.trim();
 }
 
 async function handleEvent(event) {
@@ -391,7 +458,28 @@ async function handleEvent(event) {
 
   const detailMatch = text.match(/^明細\s+(\d{4,6})(?:\s+(基本組|進階組))?$/);
   if (detailMatch) { const code = detailMatch[1]; const groupFilter = detailMatch[2] || null; const entries = await portfolio.getTransactionList(code, groupFilter); const msg = portfolio.formatTransactionList(code, portfolio.getName(code), entries); await replyLongMessage(replyToken, sourceId, msg); return; }
-  if (text === "結算" || text === "已結算") { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "「結算」已搬到 Claude 對話視窗處理。先打「打包資料庫」匯出資料。" }] }); return; }
+
+  if (text === "今日結算" || text === "結算") {
+    try {
+      const msg = await buildSettlementSummary("today", dateStr);
+      await replyLongMessage(replyToken, sourceId, msg);
+    } catch (err) {
+      console.error("[今日結算]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢今日結算時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
+
+  if (text === "已結算") {
+    try {
+      const msg = await buildSettlementSummary("all", dateStr);
+      await replyLongMessage(replyToken, sourceId, msg);
+    } catch (err) {
+      console.error("[已結算]", err.message);
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢已結算時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
 
   if (text === "強制對齊持股") {
     if (!isAdmin(senderName)) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "此指令僅限老師本人或管理員使用" }] }); return; }
@@ -429,7 +517,7 @@ async function handleEvent(event) {
     const msg = "📋 指令一覽\n" + "─".repeat(20) + "\n" +
       "【偵測確認】\n偵測到訊號後可直接點卡片按鈕確認\n補偵測 老師原始訊息（管理員）\n確認 5475　確認 5475 158　確認全部　待確認\n\n" +
       "【買賣記錄】\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n\n" +
-      "【查詢】\n查股 2330\n新聞 2330\n明細 3533\n持股\n備份\n\n" +
+      "【查詢】\n查股 2330\n新聞 2330\n明細 3533\n持股\n今日結算（只看今天賣光的輪次）\n已結算（只看 " + SETTLEMENT_START_DATE + " 起）\n備份\n\n" +
       "【管理】\n打包資料庫\n清空所有交易紀錄\n清除回補資料\n強制對齊持股";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
