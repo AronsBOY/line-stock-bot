@@ -95,7 +95,110 @@ async function replyLongMessage(replyToken, to, text) {
   if (chunks.length > 5) await pushLongMessage(to, chunks.slice(5).join("\n\n"));
 }
 
+function buildSignalConfirmFlex(sig, detectedGroup, dateStr, timeStr, price) {
+  const code = sig.stock_code;
+  const name = sig.stock_name || portfolio.getName(code) || "";
+  const actionText = sig.action === "賣出" ? "賣出" : "買入";
+  const detailRows = [
+    { type: "text", text: "時間：" + dateStr + " " + timeStr, size: "sm", color: "#666666", wrap: true },
+  ];
+  if (sig.suggested_price) {
+    detailRows.push({ type: "text", text: "老師建議價：" + sig.suggested_price, size: "sm", color: "#444444", wrap: true, margin: "sm" });
+  }
+  detailRows.push({ type: "text", text: "歷史成交價：" + price, size: "sm", color: "#111111", weight: "bold", wrap: true, margin: "sm" });
+  if (sig.original) {
+    detailRows.push({ type: "text", text: "訊息：" + sig.original, size: "xs", color: "#777777", wrap: true, margin: "md" });
+  }
+
+  return {
+    type: "flex",
+    altText: "偵測到訊號 " + code + " " + name + " " + actionText,
+    contents: {
+      type: "bubble",
+      size: "kilo",
+      body: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          { type: "text", text: "📊 偵測到訊號", weight: "bold", size: "lg" },
+          { type: "text", text: code + " " + name + " " + actionText + (detectedGroup ? "【" + detectedGroup + "】" : ""), weight: "bold", size: "xl", wrap: true, margin: "md" },
+          { type: "separator", margin: "md" },
+          { type: "box", layout: "vertical", contents: detailRows, margin: "md" },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            height: "sm",
+            action: {
+              type: "postback",
+              label: "✅ 以 " + price + " 確認" + actionText,
+              data: "action=confirm_signal&code=" + encodeURIComponent(code),
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function handleSignalPostback(event) {
+  const data = new URLSearchParams((event.postback && event.postback.data) || "");
+  if (data.get("action") !== "confirm_signal") return false;
+
+  const code = data.get("code");
+  const replyToken = event.replyToken;
+  if (!code) {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "確認失敗：缺少股票代號" }] });
+    return true;
+  }
+
+  const pending = await pendingSignals.getPending(code);
+  if (!pending) {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "這筆 " + code + " 訊號已經確認過，或目前已不在待確認清單。" }] });
+    return true;
+  }
+  if (!pending.price) {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "這筆 " + code + " 尚未取得成交價，請改用：確認 " + code + " 實際成交價" }] });
+    return true;
+  }
+
+  if (pending.action === "買入") {
+    await portfolio.addBuy(code, code, pending.date, pending.price, pending.time, pending.original, pending.group, pending.suggestedPrice, "signal");
+  } else {
+    await portfolio.addSell(code, code, pending.date, pending.price, pending.time, pending.original, pending.group, pending.suggestedPrice, "signal");
+  }
+  await pendingSignals.deletePending(code);
+
+  await lineClient.replyMessage({
+    replyToken,
+    messages: [{
+      type: "text",
+      text: "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (pending.group ? "【" + pending.group + "】" : "") + "\n" +
+        "日期：" + pending.date + " " + pending.time + "\n" +
+        "成交價：" + pending.price + "（歷史）",
+    }],
+  });
+  return true;
+}
+
 async function handleEvent(event) {
+  if (event.type === "postback") {
+    try {
+      await handleSignalPostback(event);
+    } catch (err) {
+      console.error("[Postback]", err.message);
+      try {
+        await lineClient.replyMessage({ replyToken: event.replyToken, messages: [{ type: "text", text: "按鈕確認失敗：" + err.message }] });
+      } catch (e) {}
+    }
+    return;
+  }
   if (event.type !== "message" || event.message.type !== "text") return;
   const text = event.message.text.trim();
   const sourceId = event.source.groupId || event.source.roomId || event.source.userId;
@@ -225,7 +328,7 @@ async function handleEvent(event) {
       return p.code + " " + (portfolio.getName(p.code) || "") + " " + p.action + (p.group ? "【" + p.group + "】" : "") +
         (p.price ? " @" + p.price : " ⚠無股價") + "（" + p.date + " " + p.time + "）";
     }).join("\n");
-    await replyLongMessage(replyToken, sourceId, "待確認訊號：\n" + list + "\n\n回覆「確認 代號」或「確認全部」");
+    await replyLongMessage(replyToken, sourceId, "待確認訊號：\n" + list + "\n\n可直接點訊號卡片的確認按鈕；舊的「確認 代號」或「確認全部」仍可使用。");
     return;
   }
 
@@ -443,7 +546,7 @@ async function handleEvent(event) {
   if (text === "指令" || text === "help") {
     const msg =
       "📋 指令一覽\n" + "─".repeat(20) + "\n" +
-      "【偵測確認】\n確認 5475　確認 5475 158　確認全部　待確認\n\n" +
+      "【偵測確認】\n偵測到訊號後可直接點卡片按鈕確認；舊指令仍保留：確認 5475　確認 5475 158　確認全部　待確認\n\n" +
       "【買賣記錄】\n買 3533 2026-04-23 10:04\n買 3533 2026-04-23\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n賣 3533 2026-04-23 2445\n\n" +
       "【調整】\n調整 3533 2026-04-23 2500\n取消 3533 2026-04-23\n名稱 2327 國巨\n\n" +
       "【組別分類】\n買/賣/新增/賣出 指令結尾可加「基本組」或「進階組」\n例：買 3533 2026-04-23 2445 進階組\n\n" +
@@ -468,15 +571,20 @@ async function handleEvent(event) {
       const p = await fetchHistoricalPrice(code, dateStr, timeStr);
       const price = p ? p.price : null;
       await pendingSignals.setPending(code, { action: sig.action, date: dateStr, time: timeStr, price, suggestedPrice: sig.suggested_price, original: sig.original, group: detectedGroup });
-      const msg =
-        "📊 偵測到訊號\n" + "━".repeat(16) + "\n" +
-        code + " " + (sig.stock_name || portfolio.getName(code) || "") + " " + sig.action + (detectedGroup ? "【" + detectedGroup + "】" : "") + "\n" +
-        "時間：" + dateStr + " " + timeStr + "\n" +
-        (sig.suggested_price ? "老師建議價：" + sig.suggested_price + "\n" : "") +
-        (price ? "歷史成交價：" + price : "⚠ 股價查詢失敗") + "\n" +
-        "訊息：" + sig.original + "\n" + "━".repeat(16) + "\n" +
-        (price ? "回覆「確認 " + code + "」以 " + price + " 記錄" : "回覆「確認 " + code + " 實際成交價」記錄");
-      msgs.push({ type: "text", text: msg });
+
+      if (price) {
+        msgs.push(buildSignalConfirmFlex(sig, detectedGroup, dateStr, timeStr, price));
+      } else {
+        const msg =
+          "📊 偵測到訊號\n" + "━".repeat(16) + "\n" +
+          code + " " + (sig.stock_name || portfolio.getName(code) || "") + " " + sig.action + (detectedGroup ? "【" + detectedGroup + "】" : "") + "\n" +
+          "時間：" + dateStr + " " + timeStr + "\n" +
+          (sig.suggested_price ? "老師建議價：" + sig.suggested_price + "\n" : "") +
+          "⚠ 股價查詢失敗\n" +
+          "訊息：" + sig.original + "\n" + "━".repeat(16) + "\n" +
+          "請用「確認 " + code + " 實際成交價」記錄";
+        msgs.push({ type: "text", text: msg });
+      }
     }
     if (msgs.length > 0) await lineClient.replyMessage({ replyToken, messages: msgs.slice(0, 5) });
   } catch (err) { console.error("[老師訊號]", err.message); }
