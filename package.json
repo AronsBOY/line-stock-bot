@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "backtest:history": "node src/historicalBacktest/run.js"
   },
   "dependencies": {
     "@line/bot-sdk": "^9.3.0",
