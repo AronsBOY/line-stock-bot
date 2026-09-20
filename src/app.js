@@ -8,6 +8,7 @@ const { setupScheduler, addSignal } = require("./scheduler");
 const portfolio = require("./portfolio");
 const pendingSignals = require("./pendingSignals");
 const { migrate } = require("./migrate");
+const { buildSingleStockNewsReport, buildHoldingsNewsReport } = require("./newsSearch");
 
 const SETTLEMENT_START_DATE = "2026-09-11";
 
@@ -321,16 +322,30 @@ async function handleEvent(event) {
     return;
   }
 
+  // ── 持股 / 個股新聞 ──
+  if (text === "新聞") {
+    try {
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "📰 正在搜尋目前持股的熱門公開新聞，請稍候..." }] });
+      const report = await buildHoldingsNewsReport(portfolio);
+      await pushLongMessage(sourceId, report);
+    } catch (err) {
+      console.error("[持股新聞]", err.message);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "搜尋持股新聞時發生錯誤：" + err.message }] });
+    }
+    return;
+  }
+
   const newsMatch = text.match(/^新聞\s+(\d{4,6})$/);
   if (newsMatch) {
     const code = newsMatch[1];
-    const name = portfolio.getName(code) || code;
     try {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "查詢 " + code + " " + name + " 資訊中..." }] });
-      const resp = await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 500, messages: [{ role: "user", content: "請用繁體中文簡短介紹台股 " + code + " " + name + "，包含：1.主要業務 2.所屬概念股族群 3.近期重要消息（你知道的），200字以內。" }] });
-      const info = resp.content[0].text;
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "📋 " + code + " " + name + "\n" + "─".repeat(18) + "\n" + info }] });
-    } catch (err) { await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "無法取得 " + code + " 的資訊" }] }); }
+      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "📰 正在搜尋 " + code + " 的熱門公開新聞..." }] });
+      const report = await buildSingleStockNewsReport(portfolio, code);
+      await pushLongMessage(sourceId, report);
+    } catch (err) {
+      console.error("[個股新聞]", err.message);
+      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "搜尋 " + code + " 新聞時發生錯誤：" + err.message }] });
+    }
     return;
   }
 
