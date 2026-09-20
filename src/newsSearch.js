@@ -125,7 +125,7 @@ function buildQuery(code, name) {
 
 async function gdeltSearch(code, name, timespan) {
   const response = await axios.get(GDELT_URL, {
-    timeout: 12000,
+    timeout: 5500,
     params: {
       query: buildQuery(code, name),
       mode: "ArtList",
@@ -170,20 +170,35 @@ function mergeUnique(existing, incoming) {
   return existing;
 }
 
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeoutPromise = new Promise(function(_, reject) {
+    timer = setTimeout(function() {
+      reject(new Error((label || "operation") + " timeout after " + ms + "ms"));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getStockNews(code, name, limit) {
   const max = limit || 3;
   let items = [];
 
   try {
-    items = mergeUnique(items, await gdeltSearch(code, name, "1week"));
+    items = mergeUnique(items, await withTimeout(gdeltSearch(code, name, "1week"), 6500, "GDELT 1week"));
   } catch (err) {
     console.error("[新聞] 近一週搜尋失敗 " + code + ":", err.message);
   }
 
-  if (items.length < max) {
-    await sleep(250);
+  // 只有近一週成功但篇數不足時才擴大到近一月；
+  // 若近一週本身逾時/失敗，不再連續等第二個遠端逾時。
+  if (items.length > 0 && items.length < max) {
     try {
-      items = mergeUnique(items, await gdeltSearch(code, name, "1month"));
+      items = mergeUnique(items, await withTimeout(gdeltSearch(code, name, "1month"), 6500, "GDELT 1month"));
     } catch (err) {
       console.error("[新聞] 近一月搜尋失敗 " + code + ":", err.message);
     }
@@ -225,19 +240,46 @@ async function buildHoldingsNewsReport(portfolio) {
 
   if (!codes.length) return "📰 持股新聞｜" + todayTW() + "\n目前沒有持股";
 
-  const blocks = [];
-  // 逐檔搜尋並輕微節流，避免一次打太多公開搜尋請求。
-  for (let i = 0; i < codes.length; i++) {
-    const code = codes[i];
-    const name = portfolio.getName(code) || code;
-    const articles = await getStockNews(code, name, 3);
-    blocks.push(formatStockBlock(code, name, articles));
-    if (i < codes.length - 1) await sleep(250);
+  // 原本逐檔串行搜尋：9 檔 × 每檔最多 2 次 × 12 秒，最差會超過 3 分鐘。
+  // 改成最多 3 檔並行，並對整批設定硬上限，確保 LINE 不會一直停在「請稍候」。
+  const results = new Array(codes.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= codes.length) return;
+      const code = codes[i];
+      const name = portfolio.getName(code) || code;
+      try {
+        const articles = await getStockNews(code, name, 3);
+        results[i] = formatStockBlock(code, name, articles);
+      } catch (err) {
+        console.error("[新聞] 搜尋失敗 " + code + ":", err.message);
+        results[i] = "📌 " + code + " " + name + "\n新聞搜尋暫時失敗";
+      }
+    }
   }
+
+  const workers = [];
+  for (let i = 0; i < Math.min(3, codes.length); i++) workers.push(worker());
+
+  try {
+    await withTimeout(Promise.all(workers), 22000, "holdings news batch");
+  } catch (err) {
+    console.error("[持股新聞] 整批逾時:", err.message);
+  }
+
+  // 即使部分股票在整批上限內尚未完成，也一定回傳結果，不讓指令卡死。
+  const blocks = codes.map(function(code, i) {
+    if (results[i]) return results[i];
+    const name = portfolio.getName(code) || code;
+    return "📌 " + code + " " + name + "\n新聞搜尋逾時，請改用「新聞 " + code + "」單獨查詢";
+  });
 
   return "📰 持股熱門新聞｜" + todayTW() + "\n" +
     "每檔最多 3 篇｜優先近一週，不足才擴至近一月\n" +
-    "來源限可信公開媒體；排序依相關性與媒體權重\n" +
+    "來源限可信公開媒體；整批搜尋最長約 22 秒\n" +
     "════════════════════\n\n" +
     blocks.join("\n\n════════════════════\n\n");
 }
