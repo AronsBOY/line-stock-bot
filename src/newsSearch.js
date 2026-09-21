@@ -240,8 +240,8 @@ async function buildHoldingsNewsReport(portfolio) {
 
   if (!codes.length) return "📰 持股新聞｜" + todayTW() + "\n目前沒有持股";
 
-  // 原本逐檔串行搜尋：9 檔 × 每檔最多 2 次 × 12 秒，最差會超過 3 分鐘。
-  // 改成最多 3 檔並行，並對整批設定硬上限，確保 LINE 不會一直停在「請稍候」。
+  // 搜尋全部目前持股，但最終只顯示「有找到新聞」的股票，最多 3 檔。
+  // 某檔沒有新聞就不硬湊；全部都沒有則直接回覆「無」。
   const results = new Array(codes.length);
   let cursor = 0;
 
@@ -253,10 +253,10 @@ async function buildHoldingsNewsReport(portfolio) {
       const name = portfolio.getName(code) || code;
       try {
         const articles = await getStockNews(code, name, 3);
-        results[i] = formatStockBlock(code, name, articles);
+        results[i] = { code, name, articles };
       } catch (err) {
         console.error("[新聞] 搜尋失敗 " + code + ":", err.message);
-        results[i] = "📌 " + code + " " + name + "\n新聞搜尋暫時失敗";
+        results[i] = { code, name, articles: [] };
       }
     }
   }
@@ -270,15 +270,22 @@ async function buildHoldingsNewsReport(portfolio) {
     console.error("[持股新聞] 整批逾時:", err.message);
   }
 
-  // 即使部分股票在整批上限內尚未完成，也一定回傳結果，不讓指令卡死。
-  const blocks = codes.map(function(code, i) {
-    if (results[i]) return results[i];
-    const name = portfolio.getName(code) || code;
-    return "📌 " + code + " " + name + "\n新聞搜尋逾時，請改用「新聞 " + code + "」單獨查詢";
+  const found = results
+    .filter(function(x) { return x && Array.isArray(x.articles) && x.articles.length > 0; })
+    .slice(0, 3);
+
+  if (!found.length) {
+    return "📰 持股熱門新聞｜" + todayTW() + "\n" +
+      "目前持股沒有找到符合可信來源條件的公開新聞";
+  }
+
+  const blocks = found.map(function(x) {
+    return formatStockBlock(x.code, x.name, x.articles);
   });
 
   return "📰 持股熱門新聞｜" + todayTW() + "\n" +
-    "每檔最多 3 篇｜優先近一週，不足才擴至近一月\n" +
+    "最多顯示 3 檔有新聞的持股｜每檔最多 3 篇\n" +
+    "沒有新聞的股票不列出；若全部沒有則顯示「無」\n" +
     "來源限可信公開媒體；整批搜尋最長約 22 秒\n" +
     "════════════════════\n\n" +
     blocks.join("\n\n════════════════════\n\n");
