@@ -325,12 +325,18 @@ async function handleEvent(event) {
   // ── 持股 / 個股新聞 ──
   if (text === "新聞") {
     try {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "📰 正在搜尋目前持股的熱門公開新聞，請稍候..." }] });
+      // 不先消耗 replyToken 回覆「請稍候」。
+      // 搜尋完成後直接用同一個 replyToken 回傳結果，避免某些部署環境在 webhook 已回 200 後，
+      // 後續 pushMessage 被中止或遺失，造成使用者只看到「請稍候」。
       const report = await buildHoldingsNewsReport(portfolio);
-      await pushLongMessage(sourceId, report);
+      await replyLongMessage(replyToken, sourceId, report);
     } catch (err) {
       console.error("[持股新聞]", err.message);
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "搜尋持股新聞時發生錯誤：" + err.message }] });
+      try {
+        await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "搜尋持股新聞時發生錯誤：" + err.message }] });
+      } catch (replyErr) {
+        console.error("[持股新聞回覆失敗]", replyErr.message);
+      }
     }
     return;
   }
@@ -339,12 +345,15 @@ async function handleEvent(event) {
   if (newsMatch) {
     const code = newsMatch[1];
     try {
-      await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "📰 正在搜尋 " + code + " 的熱門公開新聞..." }] });
       const report = await buildSingleStockNewsReport(portfolio, code);
-      await pushLongMessage(sourceId, report);
+      await replyLongMessage(replyToken, sourceId, report);
     } catch (err) {
       console.error("[個股新聞]", err.message);
-      await lineClient.pushMessage({ to: sourceId, messages: [{ type: "text", text: "搜尋 " + code + " 新聞時發生錯誤：" + err.message }] });
+      try {
+        await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "搜尋 " + code + " 新聞時發生錯誤：" + err.message }] });
+      } catch (replyErr) {
+        console.error("[個股新聞回覆失敗]", replyErr.message);
+      }
     }
     return;
   }
