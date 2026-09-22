@@ -1,6 +1,7 @@
 const axios = require("axios");
 
 const GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc";
+const GOOGLE_NEWS_RSS = "https://news.google.com/rss/search";
 
 // 只收相對有公信力、且一般可直接公開閱讀的新聞來源。
 // 故意不納入常見硬付費牆媒體。
@@ -29,6 +30,21 @@ const SOURCE_NAMES = {
   "ettoday.net": "ETtoday財經雲",
   "reuters.com": "Reuters"
 };
+
+const TRUSTED_SOURCE_LABELS = new Set([
+  "中央社",
+  "鉅亨網",
+  "MoneyDJ理財網",
+  "MoneyDJ",
+  "Yahoo奇摩股市",
+  "工商時報",
+  "科技新報",
+  "自由財經",
+  "ETtoday財經雲",
+  "Reuters",
+  "經濟日報",
+  "聯合新聞網"
+]);
 
 function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
@@ -157,6 +173,95 @@ async function gdeltSearch(code, name, timespan) {
     });
 }
 
+
+function decodeXml(s) {
+  return String(s || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, function(_, n) { return String.fromCharCode(Number(n)); })
+    .trim();
+}
+
+function xmlTag(block, tag) {
+  const re = new RegExp("<" + tag + "(?:\\s[^>]*)?>([\\s\\S]*?)<\\/" + tag + ">", "i");
+  const m = String(block || "").match(re);
+  return m ? decodeXml(m[1]) : "";
+}
+
+function xmlSource(block) {
+  const m = String(block || "").match(/<source(?:\s[^>]*)?>([\s\S]*?)<\/source>/i);
+  return m ? decodeXml(m[1]) : "";
+}
+
+function rssArticleDate(raw) {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(d);
+}
+
+async function googleNewsSearch(code, name, max) {
+  const qName = String(name || "").trim();
+  const qCode = String(code || "").trim();
+  const query = qName && qName !== qCode
+    ? '"' + qName + '" OR "' + qCode + '" when:30d'
+    : '"' + qCode + '" 台股 when:30d';
+
+  const resp = await axios.get(GOOGLE_NEWS_RSS, {
+    timeout: 6500,
+    responseType: "text",
+    params: {
+      q: query,
+      hl: "zh-TW",
+      gl: "TW",
+      ceid: "TW:zh-Hant"
+    },
+    headers: {
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+
+  const xml = String(resp.data || "");
+  const itemBlocks = xml.match(/<item>[\s\S]*?<\/item>/gi) || [];
+  const out = [];
+
+  for (let i = 0; i < itemBlocks.length; i++) {
+    const block = itemBlocks[i];
+    const title = cleanTitle(xmlTag(block, "title"));
+    const url = canonicalUrl(xmlTag(block, "link"));
+    const source = xmlSource(block);
+    const pubDate = xmlTag(block, "pubDate");
+    if (!title || !url) continue;
+
+    // 優先可信來源；若來源標籤未知但確實有新聞，仍保留作為公開 RSS 後備來源。
+    const trusted = TRUSTED_SOURCE_LABELS.has(source);
+    out.push({
+      title,
+      url,
+      domain: "news.google.com",
+      source: source || "Google News",
+      date: rssArticleDate(pubDate),
+      trusted
+    });
+  }
+
+  out.sort(function(a, b) {
+    if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
+    return 0;
+  });
+  return out.slice(0, max || 3);
+}
+
 function mergeUnique(existing, incoming) {
   const seenUrl = new Set(existing.map(function(a) { return a.url; }));
   const seenTitle = new Set(existing.map(function(a) { return a.title; }));
@@ -191,16 +296,33 @@ async function getStockNews(code, name, limit) {
   try {
     items = mergeUnique(items, await withTimeout(gdeltSearch(code, name, "1week"), 6500, "GDELT 1week"));
   } catch (err) {
-    console.error("[新聞] 近一週搜尋失敗 " + code + ":", err.message);
+    console.error("[新聞] GDELT近一週失敗 " + code + ":", err.message);
   }
 
-  // 只有近一週成功但篇數不足時才擴大到近一月；
-  // 若近一週本身逾時/失敗，不再連續等第二個遠端逾時。
+  // GDELT 若完全沒有結果，直接改用 Google News RSS 後備。
+  if (items.length === 0) {
+    try {
+      items = mergeUnique(items, await withTimeout(googleNewsSearch(code, name, max), 7000, "Google News RSS"));
+    } catch (err) {
+      console.error("[新聞] Google News RSS失敗 " + code + ":", err.message);
+    }
+  }
+
+  // GDELT 有少量結果時才補查近一月。
   if (items.length > 0 && items.length < max) {
     try {
       items = mergeUnique(items, await withTimeout(gdeltSearch(code, name, "1month"), 6500, "GDELT 1month"));
     } catch (err) {
-      console.error("[新聞] 近一月搜尋失敗 " + code + ":", err.message);
+      console.error("[新聞] GDELT近一月失敗 " + code + ":", err.message);
+    }
+  }
+
+  // 若仍不足，再用 Google News RSS 補足。
+  if (items.length < max) {
+    try {
+      items = mergeUnique(items, await withTimeout(googleNewsSearch(code, name, max), 7000, "Google News RSS supplement"));
+    } catch (err) {
+      console.error("[新聞] Google News RSS補充失敗 " + code + ":", err.message);
     }
   }
 
@@ -225,7 +347,7 @@ async function buildSingleStockNewsReport(portfolio, code) {
   const name = portfolio.getName(code) || code;
   const articles = await getStockNews(code, name, 3);
   return "📰 熱門新聞｜" + code + " " + name + "\n" +
-    "可信公開來源｜每檔最多 3 篇\n" +
+    "公開新聞｜每檔最多 3 篇｜GDELT + Google News RSS 後備\n" +
     "────────────────────\n" +
     formatStockBlock(code, name, articles);
 }
@@ -286,7 +408,7 @@ async function buildHoldingsNewsReport(portfolio) {
   return "📰 持股熱門新聞｜" + todayTW() + "\n" +
     "最多顯示 3 檔有新聞的持股｜每檔最多 3 篇\n" +
     "沒有新聞的股票不列出；若全部沒有則顯示「無」\n" +
-    "來源限可信公開媒體；整批搜尋最長約 22 秒\n" +
+    "優先可信公開媒體；GDELT無結果時改用 Google News RSS 後備；整批搜尋最長約 22 秒\n" +
     "════════════════════\n\n" +
     blocks.join("\n\n════════════════════\n\n");
 }
