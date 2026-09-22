@@ -46,6 +46,22 @@ const TRUSTED_SOURCE_LABELS = new Set([
   "聯合新聞網"
 ]);
 
+const MATERIAL_NEWS_RE = /營收|財報|財測|法說|法說會|EPS|每股盈餘|獲利|毛利率|營益率|訂單|接單|出貨|產能|擴產|量產|新產品|新品|技術|專利|認證|客戶|供應鏈|合作|策略聯盟|投資|資本支出|併購|收購|處分|股利|配息|庫藏股|董事會|重大訊息|展望|上修|下修|海外廠|新廠|建廠|子公司|轉投資|合約|標案|訴訟|裁罰|事故|停工|復工|缺料|漲價|降價|市占|需求|庫存調整|產品組合|法人說明|董事長|總經理|高層異動|人事異動|現金增資|減資|可轉債|CB|增資|減資|分割|合併|處分資產|取得資產|AI伺服器|CoWoS|先進封裝|HBM|矽光子|ABF|載板|CPO|ASIC|晶圓|封裝|測試/;
+const PRICE_CHATTER_RE = /盤中|零股排行榜|成交量TOP|漲停|跌停|衝上.*大關|站上.*大關|挑戰.*大關|創新高|寫新高|飆漲|暴漲|強勢表態|多頭|買盤|股價.*上看|目標價|技術面|籌碼面|K線|爆量|放量|噴出|急拉|大漲|重挫|殺低|逆勢漲|領漲|領跌|紅盤|黑盤|盤勢|熱門股|當沖|零股/;
+
+function articleTimestamp(raw) {
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function isMaterialCompanyNews(title) {
+  const t = String(title || "");
+  if (!MATERIAL_NEWS_RE.test(t)) return false;
+  // 如果整個標題只有股價/盤勢語彙，且沒有明確公司面資訊，就排除。
+  if (PRICE_CHATTER_RE.test(t) && !/營收|財報|財測|法說|EPS|每股盈餘|獲利|毛利率|營益率|訂單|接單|出貨|產能|擴產|量產|新產品|技術|專利|認證|客戶|合作|投資|併購|股利|配息|庫藏股|董事會|重大訊息|展望|新廠|海外廠|合約|訴訟|裁罰|停工|復工|漲價|降價|需求|市占/.test(t)) return false;
+  return true;
+}
+
 function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
@@ -213,9 +229,8 @@ function rssArticleDate(raw) {
 async function googleNewsSearch(code, name, max) {
   const qName = String(name || "").trim();
   const qCode = String(code || "").trim();
-  const query = qName && qName !== qCode
-    ? '"' + qName + '" OR "' + qCode + '" when:7d'
-    : '"' + qCode + '" 台股 when:7d';
+  const subject = qName && qName !== qCode ? '("' + qName + '" OR "' + qCode + '")' : '("' + qCode + '" 台股)';
+  const query = subject + ' (營收 OR 財報 OR 法說 OR EPS OR 訂單 OR 接單 OR 出貨 OR 產能 OR 擴產 OR 量產 OR 技術 OR 客戶 OR 合作 OR 投資 OR 股利 OR 重大訊息 OR 展望 OR 漲價 OR 需求) when:7d';
 
   const resp = await axios.get(GOOGLE_NEWS_RSS, {
     timeout: 6500,
@@ -251,15 +266,20 @@ async function googleNewsSearch(code, name, max) {
       domain: "news.google.com",
       source: source || "Google News",
       date: rssArticleDate(pubDate),
+      timestamp: articleTimestamp(pubDate),
       trusted
     });
   }
 
-  out.sort(function(a, b) {
+  const filtered = out.filter(function(a) {
+    return isMaterialCompanyNews(a.title);
+  });
+  filtered.sort(function(a, b) {
+    if ((b.timestamp || 0) !== (a.timestamp || 0)) return (b.timestamp || 0) - (a.timestamp || 0);
     if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
     return 0;
   });
-  return out.slice(0, max || 3);
+  return filtered.slice(0, max || 6);
 }
 
 function mergeUnique(existing, incoming) {
@@ -291,25 +311,13 @@ async function withTimeout(promise, ms, label) {
 
 async function getStockNews(code, name, limit) {
   const max = limit || 3;
-  let items = [];
-
-  // 嚴格限制近 7 天：先查 GDELT 近一週。
   try {
-    items = mergeUnique(items, await withTimeout(gdeltSearch(code, name, "1week"), 6500, "GDELT 1week"));
+    // 為降低負擔：每檔持股只發 1 次 Google News RSS 請求，不再同時查 GDELT、不做第二輪補查。
+    return await withTimeout(googleNewsSearch(code, name, Math.max(max, 6)), 6500, "Google News RSS 7d");
   } catch (err) {
-    console.error("[新聞] GDELT近一週失敗 " + code + ":", err.message);
+    console.error("[新聞] Google News RSS近一週失敗 " + code + ":", err.message);
+    return [];
   }
-
-  // 不再擴大到近一月；不足時只用 Google News RSS 的 when:7d 補足。
-  if (items.length < max) {
-    try {
-      items = mergeUnique(items, await withTimeout(googleNewsSearch(code, name, max), 7000, "Google News RSS 7d"));
-    } catch (err) {
-      console.error("[新聞] Google News RSS近一週失敗 " + code + ":", err.message);
-    }
-  }
-
-  return items.slice(0, max);
 }
 
 function formatStockBlock(code, name, articles) {
@@ -425,15 +433,25 @@ function articleFlexRows(articles) {
   return rows;
 }
 
-function buildHoldingsNewsFlex(found) {
-  if (!Array.isArray(found) || !found.length) return null;
+function buildHoldingsNewsFlex(holdings) {
+  if (!Array.isArray(holdings) || !holdings.length) return null;
 
   return {
     type: "flex",
-    altText: "持股熱門新聞",
+    altText: "持股重大新聞",
     contents: {
       type: "carousel",
-      contents: found.slice(0, 3).map(function(x) {
+      contents: holdings.map(function(x) {
+        const rows = x.articles && x.articles.length
+          ? articleFlexRows(x.articles)
+          : [{
+              type: "text",
+              text: "近 7 天無重大公司面新聞",
+              wrap: true,
+              size: "sm",
+              color: "#888888",
+              margin: "md"
+            }];
         return {
           type: "bubble",
           size: "kilo",
@@ -444,7 +462,7 @@ function buildHoldingsNewsFlex(found) {
             contents: [
               {
                 type: "text",
-                text: "📰 持股新聞",
+                text: "📰 持股重大新聞",
                 weight: "bold",
                 size: "sm",
                 color: "#B45309"
@@ -460,7 +478,7 @@ function buildHoldingsNewsFlex(found) {
                 type: "separator",
                 margin: "md"
               }
-            ].concat(articleFlexRows(x.articles))
+            ].concat(rows)
           }
         };
       })
@@ -478,27 +496,23 @@ async function buildHoldingsNewsPayload(portfolio) {
 
   if (!codes.length) {
     return {
-      found: [],
-      text: "📰 持股新聞｜" + todayTW() + "\n目前沒有持股"
+      holdings: [],
+      text: "📰 持股重大新聞｜" + todayTW() + "\n目前沒有持股"
     };
   }
 
   const results = new Array(codes.length);
   let cursor = 0;
 
+  // 控制最多 3 個並行請求，降低外部新聞服務負擔。
   async function worker() {
     while (true) {
       const i = cursor++;
       if (i >= codes.length) return;
       const code = codes[i];
       const name = portfolio.getName(code) || code;
-      try {
-        const articles = await getStockNews(code, name, 3);
-        results[i] = { code, name, articles };
-      } catch (err) {
-        console.error("[新聞] 搜尋失敗 " + code + ":", err.message);
-        results[i] = { code, name, articles: [] };
-      }
+      const articles = await getStockNews(code, name, 6);
+      results[i] = { code, name, articles: articles || [] };
     }
   }
 
@@ -506,27 +520,45 @@ async function buildHoldingsNewsPayload(portfolio) {
   for (let i = 0; i < Math.min(3, codes.length); i++) workers.push(worker());
 
   try {
-    await withTimeout(Promise.all(workers), 22000, "holdings news batch");
+    await withTimeout(Promise.all(workers), 24000, "holdings news batch");
   } catch (err) {
     console.error("[持股新聞] 整批逾時:", err.message);
   }
 
-  const found = results
-    .filter(function(x) {
-      return x && Array.isArray(x.articles) && x.articles.length > 0;
-    })
-    .slice(0, 3);
+  const holdings = codes.map(function(code, i) {
+    return results[i] || { code, name: portfolio.getName(code) || code, articles: [] };
+  });
 
-  if (!found.length) {
-    return {
-      found: [],
-      text: "📰 持股熱門新聞｜" + todayTW() + "\n目前持股沒有找到公開新聞"
-    };
+  // 全部候選新聞依發布時間由新到舊排序，再做全域最多 15 則配置；
+  // 同一檔最多 3 則，沒有重大新聞的持股仍保留卡片並顯示「無重大公司面新聞」。
+  const candidates = [];
+  holdings.forEach(function(h) {
+    (h.articles || []).forEach(function(a) {
+      candidates.push({ code: h.code, article: a });
+    });
+  });
+  candidates.sort(function(a, b) {
+    return (b.article.timestamp || 0) - (a.article.timestamp || 0);
+  });
+
+  const selectedByCode = {};
+  let total = 0;
+  for (const item of candidates) {
+    if (total >= 15) break;
+    const arr = selectedByCode[item.code] || (selectedByCode[item.code] = []);
+    if (arr.length >= 3) continue;
+    arr.push(item.article);
+    total++;
   }
 
+  holdings.forEach(function(h) {
+    h.articles = selectedByCode[h.code] || [];
+  });
+
   return {
-    found,
-    text: "📰 持股熱門新聞｜" + todayTW() + "\n最多顯示 3 檔有新聞的目前持股"
+    holdings,
+    text: "📰 持股重大新聞｜" + todayTW() + "\n" +
+      "目前持股 " + holdings.length + " 檔｜每檔最多 3 則｜總數最多 15 則｜近 7 天公司面重大新聞"
   };
 }
 
