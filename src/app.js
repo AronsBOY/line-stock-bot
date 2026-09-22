@@ -328,7 +328,7 @@ async function handleEvent(event) {
       // 「新聞」只查目前持股庫存，不查指定股票。
       // 有結果時用 Flex 卡片呈現，新聞標題本身就是可點擊超連結，不再顯示冗長 URL。
       const payload = await buildHoldingsNewsPayload(portfolio);
-      const flex = buildHoldingsNewsFlex(payload.found);
+      const flex = buildHoldingsNewsFlex(payload.holdings);
       if (flex) {
         await lineClient.replyMessage({ replyToken, messages: [flex] });
       } else {
