@@ -413,8 +413,144 @@ async function buildHoldingsNewsReport(portfolio) {
     blocks.join("\n\n════════════════════\n\n");
 }
 
+function articleFlexRows(articles) {
+  const rows = [];
+  articles.forEach(function(a, i) {
+    rows.push({
+      type: "text",
+      text: (i + 1) + ". " + a.title,
+      wrap: true,
+      size: "sm",
+      weight: "bold",
+      color: "#1D4ED8",
+      action: {
+        type: "uri",
+        label: "開啟新聞",
+        uri: a.url
+      },
+      margin: i === 0 ? "none" : "lg"
+    });
+    rows.push({
+      type: "text",
+      text: (a.source || "公開來源") + (a.date ? "｜" + a.date : ""),
+      wrap: true,
+      size: "xs",
+      color: "#777777",
+      margin: "xs"
+    });
+  });
+  return rows;
+}
+
+function buildHoldingsNewsFlex(found) {
+  if (!Array.isArray(found) || !found.length) return null;
+
+  return {
+    type: "flex",
+    altText: "持股熱門新聞",
+    contents: {
+      type: "carousel",
+      contents: found.slice(0, 3).map(function(x) {
+        return {
+          type: "bubble",
+          size: "kilo",
+          body: {
+            type: "box",
+            layout: "vertical",
+            spacing: "md",
+            contents: [
+              {
+                type: "text",
+                text: "📰 持股新聞",
+                weight: "bold",
+                size: "sm",
+                color: "#B45309"
+              },
+              {
+                type: "text",
+                text: x.code + (x.name && x.name !== x.code ? " " + x.name : ""),
+                weight: "bold",
+                size: "xl",
+                wrap: true
+              },
+              {
+                type: "separator",
+                margin: "md"
+              }
+            ].concat(articleFlexRows(x.articles))
+          }
+        };
+      })
+    }
+  };
+}
+
+async function buildHoldingsNewsPayload(portfolio) {
+  const episodes = await portfolio.getAllEpisodes();
+  const codes = Object.keys(episodes)
+    .filter(function(code) {
+      return episodes[code].openEpisode && episodes[code].openEpisode.qty > 0.0001;
+    })
+    .sort();
+
+  if (!codes.length) {
+    return {
+      found: [],
+      text: "📰 持股新聞｜" + todayTW() + "\n目前沒有持股"
+    };
+  }
+
+  const results = new Array(codes.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= codes.length) return;
+      const code = codes[i];
+      const name = portfolio.getName(code) || code;
+      try {
+        const articles = await getStockNews(code, name, 3);
+        results[i] = { code, name, articles };
+      } catch (err) {
+        console.error("[新聞] 搜尋失敗 " + code + ":", err.message);
+        results[i] = { code, name, articles: [] };
+      }
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < Math.min(3, codes.length); i++) workers.push(worker());
+
+  try {
+    await withTimeout(Promise.all(workers), 22000, "holdings news batch");
+  } catch (err) {
+    console.error("[持股新聞] 整批逾時:", err.message);
+  }
+
+  const found = results
+    .filter(function(x) {
+      return x && Array.isArray(x.articles) && x.articles.length > 0;
+    })
+    .slice(0, 3);
+
+  if (!found.length) {
+    return {
+      found: [],
+      text: "📰 持股熱門新聞｜" + todayTW() + "\n目前持股沒有找到公開新聞"
+    };
+  }
+
+  return {
+    found,
+    text: "📰 持股熱門新聞｜" + todayTW() + "\n最多顯示 3 檔有新聞的目前持股"
+  };
+}
+
 module.exports = {
   getStockNews,
   buildSingleStockNewsReport,
-  buildHoldingsNewsReport
+  buildHoldingsNewsReport,
+  buildHoldingsNewsPayload,
+  buildHoldingsNewsFlex
 };
