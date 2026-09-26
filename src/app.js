@@ -11,6 +11,7 @@ const { migrate } = require("./migrate");
 const { buildSingleStockNewsReport, buildHoldingsNewsReport, buildHoldingsNewsPayload, buildHoldingsNewsFlex } = require("./newsSearch");
 const { buildMercuryRetrogradeReport } = require("./mercuryRetrograde");
 const { buildHolderTrendPayload, buildHolderTrendMessages } = require("./tdccHolders");
+const { buildChipPayload, buildChipMessages } = require("./chipAnalysis");
 
 const SETTLEMENT_START_DATE = "2026-09-11";
 
@@ -364,17 +365,17 @@ async function handleEvent(event) {
     return;
   }
 
-  // ── 集保大戶 / 散戶變化 ──
-  if (text === "大戶" || text === "集保大戶" || text === "籌碼大戶") {
+  // ── 持股籌碼整合 ──
+  if (text === "籌碼") {
     try {
-      const payload = await buildHolderTrendPayload(portfolio);
-      const messages = buildHolderTrendMessages(payload);
+      const payload = await buildChipPayload(portfolio);
+      const messages = buildChipMessages(payload);
       await lineClient.replyMessage({ replyToken, messages: messages.slice(0, 5) });
     } catch (err) {
-      console.error("[集保大戶]", err.message);
+      console.error("[籌碼]", err.message);
       await lineClient.replyMessage({
         replyToken,
-        messages: [{ type: "text", text: "集保大戶資料暫時無法取得：" + err.message }]
+        messages: [{ type: "text", text: "籌碼資料暫時無法取得：" + err.message }]
       });
     }
     return;
@@ -575,7 +576,7 @@ async function handleEvent(event) {
     const msg = "📋 指令一覽\n" + "─".repeat(20) + "\n" +
       "【偵測確認】\n偵測到訊號後可直接點卡片按鈕確認\n補偵測 老師原始訊息（管理員）\n確認 5475　確認 5475 158　確認全部　待確認\n\n" +
       "【買賣記錄】\n買 3533 2026-04-23 2445\n賣 3533 2026-04-23 一半\n\n" +
-      "【查詢】\n查股 2330\n新聞（目前持股重大新聞）\n新聞 2330（指定單一股票）\n大戶（目前持股千張大戶／30張以下散戶週變化）\n水逆（日期＋台股娛樂回測＋受影響星座）\n明細 3533\n持股\n今日結算（只看今天賣光的輪次）\n已結算（只看 " + SETTLEMENT_START_DATE + " 起）\n備份\n\n" +
+      "【查詢】\n查股 2330\n新聞（目前持股重大新聞）\n新聞 2330（指定單一股票）\n籌碼（目前持股：集保大戶／三大法人／融資融券）\n水逆（日期＋台股娛樂回測＋受影響星座）\n明細 3533\n持股\n今日結算（只看今天賣光的輪次）\n已結算（只看 " + SETTLEMENT_START_DATE + " 起）\n備份\n\n" +
       "【管理】\n打包資料庫\n清空所有交易紀錄\n清除回補資料\n強制對齊持股";
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: msg }] });
     return;
