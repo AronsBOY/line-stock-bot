@@ -133,6 +133,33 @@ function buildSignalConfirmFlex(sig, detectedGroup, dateStr, timeStr, price) {
   };
 }
 
+
+function isFullExitSignal(pending) {
+  if (!pending || pending.action !== "賣出") return false;
+  const text = String(pending.original || "");
+  return ["獲利出清", "全部出清", "全數出清", "賣光", "全部賣出", "全數賣出", "清倉"].some(function(p) {
+    return text.includes(p);
+  });
+}
+
+async function recordPendingSignal(pending, code, price, group) {
+  if (pending.action === "買入") {
+    await portfolio.addBuy(code, code, pending.date, price, pending.time, pending.original, group, pending.suggestedPrice, "signal");
+    return { qty: 1, remaining: null };
+  }
+
+  let qty = 1;
+  let remainingAfter = null;
+  if (isFullExitSignal(pending)) {
+    const pos = await portfolio.getRemaining(code);
+    if (pos.remaining <= 0) return { qty: 0, remaining: 0 };
+    qty = pos.remaining;
+    remainingAfter = 0;
+  }
+  await portfolio.addSell(code, code, pending.date, price, pending.time, pending.original, group, pending.suggestedPrice, "signal", null, qty);
+  return { qty: qty, remaining: remainingAfter };
+}
+
 async function handleSignalPostback(event) {
   const data = new URLSearchParams((event.postback && event.postback.data) || "");
   if (data.get("action") !== "confirm_signal") return false;
@@ -151,8 +178,7 @@ async function handleSignalPostback(event) {
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "這筆 " + code + " 尚未取得成交價，請改用：確認 " + code + " 實際成交價" }] });
     return true;
   }
-  if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, pending.price, pending.time, pending.original, pending.group, pending.suggestedPrice, "signal");
-  else await portfolio.addSell(code, code, pending.date, pending.price, pending.time, pending.original, pending.group, pending.suggestedPrice, "signal");
+  const recorded = await recordPendingSignal(pending, code, pending.price, pending.group);
   await pendingSignals.deletePending(code);
   await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text:
     "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (pending.group ? "【" + pending.group + "】" : "") + "\n" +
@@ -403,8 +429,7 @@ async function handleEvent(event) {
     const finalPrice = manualPrice || pending.price;
     if (!finalPrice) { await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "請提供成交價：\n確認 " + code + " 價格" }] }); return; }
     const finalGroup = confirmExtract.group || pending.group;
-    if (pending.action === "買入") await portfolio.addBuy(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice, "signal");
-    else await portfolio.addSell(code, code, pending.date, finalPrice, pending.time, pending.original, finalGroup, pending.suggestedPrice, "signal");
+    const recorded = await recordPendingSignal(pending, code, finalPrice, finalGroup);
     await pendingSignals.deletePending(code);
     await lineClient.replyMessage({ replyToken, messages: [{ type: "text", text: "✅ 已記錄\n" + code + " " + (portfolio.getName(code) || "") + " " + pending.action + (finalGroup ? "【" + finalGroup + "】" : "") + "\n日期：" + pending.date + " " + pending.time + "\n成交價：" + finalPrice + (manualPrice ? "（手動）" : "（歷史）") }] });
     return;
@@ -416,8 +441,7 @@ async function handleEvent(event) {
     const failed = [];
     for (const p of all) {
       if (!p.price) { failed.push(p.code); continue; }
-      if (p.action === "買入") await portfolio.addBuy(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice, "signal");
-      else await portfolio.addSell(p.code, p.code, p.date, p.price, p.time, p.original, p.group, p.suggestedPrice, "signal");
+      await recordPendingSignal(p, p.code, p.price, p.group);
       await pendingSignals.deletePending(p.code);
     }
     let msg = "✅ 已記錄 " + (all.length - failed.length) + " 筆";
