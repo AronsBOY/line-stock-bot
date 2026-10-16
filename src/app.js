@@ -137,7 +137,9 @@ function buildSignalConfirmFlex(sig, detectedGroup, dateStr, timeStr, price) {
 function isFullExitSignal(pending) {
   if (!pending || pending.action !== "賣出") return false;
   const text = String(pending.original || "");
-  return ["獲利出清", "全部出清", "全數出清", "賣光", "全部賣出", "全數賣出", "清倉"].some(function(p) {
+  // 部分賣出優先於一般出場詞，避免「先獲利一半」誤判為全部出清。
+  if (/(?:一半|半數|部分|分批|減碼|先賣(?:出)?[一二三四五六七八九十\\d]+張|賣(?:出)?[一二三四五六七八九十\\d]+張)/.test(text)) return false;
+  return ["獲利出清", "全部出清", "全數出清", "賣光", "全部賣出", "全數賣出", "清倉", "獲利了結", "停損", "止損", "出場"].some(function(p) {
     return text.includes(p);
   });
 }
